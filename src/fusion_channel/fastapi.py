@@ -65,11 +65,41 @@ def build_channel_router(registry: ChannelRegistry, prefix: str = "/webhook") ->
         if len(channel_request.body) > MAX_BODY_BYTES:
             logger.warning("webhook body too large channel=%s bytes=%d", channel_id, len(channel_request.body))
             return JSONResponse({"error": "payload too large"}, status_code=413)
-        result = await registry.handle_inbound(channel_id, channel_request)
+        try:
+            result = await registry.handle_inbound(channel_id, channel_request)
+        except Exception as exc:
+            # Fail closed (PRD §4.2): no webhook input ever yields a 500 —
+            # reject-archive what we have and answer 400 with a traceback in
+            # the server log.
+            logger.exception("webhook internal error channel=%s err=%s", channel_id, exc)
+            try:
+                await registry._reject(channel_id, channel_request, f"internal_error:{type(exc).__name__}")
+            except Exception as reject_exc:
+                logger.error("reject archive failed channel=%s err=%s", channel_id, reject_exc)
+            return PlainTextResponse("internal error", status_code=400)
         return _to_response(result.response)
 
     @router.get(prefix + "/health")
     async def channel_health():
         return JSONResponse({"channels": sorted(registry.channels.keys())})
+
+    @router.get(prefix + "/{channel_id}")
+    async def channel_webhook_get(channel_id: str, request: Request):
+        # GET handshakes: WeCom URL-verification echostr, WhatsApp
+        # hub.challenge. Delegates to the adapter; unknown channels 404.
+        adapter = registry.adapters.get(channel_id)
+        if adapter is None:
+            return PlainTextResponse("unknown channel", status_code=404)
+        channel_request = ChannelRequest(
+            method="GET",
+            url=str(request.url),
+            headers={k.lower(): v for k, v in request.headers.items()},
+        )
+        try:
+            response = adapter.handle_verification_get(channel_request)
+        except Exception as exc:
+            logger.exception("webhook GET handshake error channel=%s err=%s", channel_id, exc)
+            return PlainTextResponse("internal error", status_code=400)
+        return _to_response(response)
 
     return router

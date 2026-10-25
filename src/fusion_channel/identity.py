@@ -21,8 +21,17 @@ class IdentityMapper:
 
     def bind_identity(self, identity_id: str, channel_id: str, external_id: str, tenant: str | None = None) -> None:
         key = (channel_id, external_id)
+        previous = self._by_binding.get(key)
+        if previous is not None and previous != identity_id:
+            # Rebinding to a new account must not leave the old account's
+            # _by_identity entry claiming this binding.
+            stale = self._by_identity.get(previous, [])
+            self._by_identity[previous] = [item for item in stale if item != key]
+            logger.info("identity rebind channel=%s external=%s old=%s", channel_id, _mask(external_id), previous)
         self._by_binding[key] = identity_id
-        self._by_identity.setdefault(identity_id, []).append(key)
+        bindings = self._by_identity.setdefault(identity_id, [])
+        if key not in bindings:
+            bindings.append(key)
         logger.info("identity bound identity=%s channel=%s external=%s", identity_id, channel_id, _mask(external_id))
 
     def unbind_identity(self, identity_id: str, channel_id: str, external_id: str) -> None:

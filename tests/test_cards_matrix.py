@@ -67,11 +67,31 @@ def test_render_telegram_inline_keyboard():
 
 def test_render_wecom_partial_card_plus_text():
     renderer = CardRenderer()
-    rendered = renderer.render(ChannelCapabilities(CAN_CARDS="partial"), "wecom_app", approval_card())
+    card = approval_card()
+    card.url = "https://ops.example.com/approvals/AP-123456"
+    rendered = renderer.render(ChannelCapabilities(CAN_CARDS="partial"), "wecom_app", card)
     # partial: real card AND text fallback rendered together (PRD §6.3)
     assert rendered.card_payload["msgtype"] == "textcard"
+    assert rendered.card_payload["textcard"]["url"] == card.url
+    assert "example.invalid" not in str(rendered.card_payload)
     assert rendered.used_fallback is False
     assert "同意" in rendered.text
+
+
+def test_render_wecom_card_without_url_degrades_to_text():
+    renderer = CardRenderer()
+    rendered = renderer.render(ChannelCapabilities(CAN_CARDS="partial"), "wecom_app", approval_card())
+    # No click url means no valid textcard — plain text, no placeholder URL.
+    assert rendered.card_payload == {}
+    assert "同意" in rendered.text
+
+
+def test_render_telegram_card_without_actions_no_empty_keyboard():
+    renderer = CardRenderer()
+    card = ApprovalCard(title="通知", body="无按钮")
+    rendered = renderer.render(ChannelCapabilities(CAN_CARDS="full"), "telegram_bot", card)
+    # Empty inline_keyboard is a Telegram API 400 — actionless cards degrade.
+    assert rendered.card_payload == {}
 
 
 def test_command_parser_converges_with_button():

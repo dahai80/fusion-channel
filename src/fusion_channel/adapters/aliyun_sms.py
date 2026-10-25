@@ -32,6 +32,10 @@ logger = logging.getLogger(__name__)
 ALIYUN_SMS_ENDPOINT = "https://dysmsapi.aliyuncs.com"
 
 
+def _percent_encode(value) -> str:
+    return urllib.parse.quote(str(value), safe="-_.~")
+
+
 @register
 class AliyunSmsAdapter(HttpAdapterMixin, ChannelAdapter):
     # China-mainland SMS via Aliyun Dysmsapi RPC (signature v1). Mostly
@@ -102,9 +106,12 @@ class AliyunSmsAdapter(HttpAdapterMixin, ChannelAdapter):
 
     def _signed(self, params: dict) -> dict:
         # Aliyun RPC signature v1: HMAC-SHA1 over percent-encoded query.
+        # percentEncode is RFC3986 strict (space -> %20, not "+"), then the
+        # whole query string is percent-encoded once more for the string
+        # to sign — urlencode() here produces SignatureDoesNotMatch.
         secret = self.credentials.get("access_key_secret", "") + "&"
-        sorted_query = urllib.parse.urlencode(sorted(params.items()))
-        string_to_sign = "GET&%2F&" + urllib.parse.quote(sorted_query, safe="")
+        query = "&".join(f"{_percent_encode(k)}={_percent_encode(v)}" for k, v in sorted(params.items()))
+        string_to_sign = "GET&%2F&" + _percent_encode(query)
         digest = hmac.new(secret.encode(), string_to_sign.encode(), hashlib.sha1).digest()
         signed = dict(params)
         signed["Signature"] = base64.b64encode(digest).decode()

@@ -94,7 +94,10 @@ class DingTalkRobotAdapter(HttpAdapterMixin, ChannelAdapter):
         ]
         return InboundEnvelope(
             channel_id=self.channel_id,
-            message_id=params.get("msgId", "") or params.get("sessionId", ""),
+            # msgId only — sessionId is constant per chat and would mute the
+            # whole group in dedup; registry synthesizes an id when msgId is
+            # absent.
+            message_id=params.get("msgId", ""),
             conversation=Conversation(type="group", id=conversation_id),
             sender=ExternalIdentity(channel_id=self.channel_id, external_id=sender_id, display_name=sender_nick),
             text=text.strip(),
@@ -120,16 +123,22 @@ class DingTalkRobotAdapter(HttpAdapterMixin, ChannelAdapter):
             return SendResult(ok=False, error=f"dingtalk http error: {redact_secrets(str(exc))}")
 
     async def test_connection(self) -> TestResult:
-        # Signed self-check: compute a fresh sign and post an empty probe.
+        # Static check only: every robot send lands in a real production
+        # group, so a connectivity probe must not post. Validates that the
+        # credentials are present and a fresh sign computes.
+        import time
+
+        from fusion_channel.verify import compute_dingtalk_sign
+
+        if not self.webhook_token() or not self.credentials.get("secret"):
+            return TestResult(ok=False, detail="missing access_token or secret")
         try:
-            async with self._client() as client:
-                resp = await client.post(self._webhook_url(), json={"msgtype": "text", "text": {"content": "test"}})
-            payload = resp.json()
-            if payload.get("errcode") == 0:
-                return TestResult(ok=True, detail="robot reachable and sign valid")
-            return TestResult(ok=False, detail=f"errcode={payload.get('errcode')} msg={payload.get('errmsg')}")
-        except httpx.HTTPError as exc:
-            return TestResult(ok=False, detail=f"http error: {redact_secrets(str(exc))}")
+            sign = compute_dingtalk_sign(self.credentials.get("secret", ""), int(time.time() * 1000))
+            if not sign:
+                return TestResult(ok=False, detail="sign computation failed")
+        except Exception as exc:
+            return TestResult(ok=False, detail=f"sign computation error: {redact_secrets(str(exc))}")
+        return TestResult(ok=True, detail="credentials present, sign valid (static check, no group post)")
 
     async def group_ops(self) -> GroupOps:
         return DingTalkGroupOps(self)

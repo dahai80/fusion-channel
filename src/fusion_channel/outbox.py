@@ -15,6 +15,21 @@ logger = logging.getLogger(__name__)
 RETRY_BACKOFF = [30, 120, 600]
 MAX_ATTEMPTS = 3
 DEFAULT_LIMIT_PER_MINUTE = 60
+MAX_PENDING_SECONDS = 24 * 3600  # pending records older than this fail permanently
+
+
+def _aged_out(record) -> bool:
+    created = getattr(record, "created_at", None)
+    if not created:
+        return False
+    try:
+        created_dt = dt.datetime.fromisoformat(created)
+    except ValueError:
+        return False
+    if created_dt.tzinfo is None:
+        created_dt = created_dt.replace(tzinfo=dt.UTC)
+    return (dt.datetime.now(dt.UTC) - created_dt).total_seconds() > MAX_PENDING_SECONDS
+
 
 # Per-adapter default quotas (PRD §7.2); config can override.
 DEFAULT_RATE_LIMITS_PER_MINUTE: dict[str, int] = {
@@ -90,6 +105,8 @@ class OutboxSender:
     async def flush_once(self, send_fn: Callable[[OutboundMessage], Awaitable[SendResult]] | None = None) -> int:
         sent = 0
         now = dt.datetime.now(dt.UTC).isoformat()
+        # Crash recovery: requeue records whose 'sending' lease expired.
+        await self.store.requeue_stale_sending(now)
         due = await self.store.due_outbound(now, limit=20)
         for record in due:
             message = OutboundMessage.model_validate(record.payload["message"])
@@ -98,10 +115,28 @@ class OutboxSender:
                 record.status = "failed"
                 record.last_error = f"unknown channel {message.channel_id}"
                 await self.store.update_outbound(record)
+                await self._fire_permanent_failure(message, record.last_error)
+                continue
+            if _aged_out(record):
+                record.status = "failed"
+                record.last_error = "max age exceeded while pending"
+                await self.store.update_outbound(record)
+                logger.error("outbox expired id=%s channel=%s", record.id, message.channel_id)
+                await self._fire_permanent_failure(message, record.last_error)
                 continue
             bucket = self.bucket_for(message.channel_id)
             if not bucket.take():
+                # Bump the retry time so deferred records cannot park at the
+                # head of the due queue and starve every other channel.
+                record.next_retry_at = (dt.datetime.now(dt.UTC) + dt.timedelta(seconds=5)).isoformat()
+                await self.store.update_outbound(record)
                 logger.info("outbox deferred by rate limit id=%s channel=%s", record.id, message.channel_id)
+                continue
+            # CAS claim: a second worker (run_loop + manual flush, or another
+            # process on the same store) must not double-send this record.
+            if not await self.store.claim_outbound(
+                record.id, (dt.datetime.now(dt.UTC) + dt.timedelta(seconds=300)).isoformat()
+            ):
                 continue
             try:
                 send = send_fn or adapter.send
@@ -120,17 +155,22 @@ class OutboxSender:
                 if record.attempts >= MAX_ATTEMPTS:
                     record.status = "failed"
                     logger.error("outbox failed permanently id=%s err=%s", record.id, exc)
-                    if self.on_permanent_failure is not None:
-                        try:
-                            await self.on_permanent_failure(message, record.last_error)
-                        except Exception as hook_exc:
-                            logger.error("permanent failure hook error: %s", hook_exc)
                 else:
                     delay = RETRY_BACKOFF[min(record.attempts - 1, len(RETRY_BACKOFF) - 1)]
                     record.next_retry_at = (dt.datetime.now(dt.UTC) + dt.timedelta(seconds=delay)).isoformat()
                     logger.warning("outbox retry id=%s attempt=%s err=%s", record.id, record.attempts, exc)
             await self.store.update_outbound(record)
+            if record.status == "failed":
+                await self._fire_permanent_failure(message, record.last_error)
         return sent
+
+    async def _fire_permanent_failure(self, message: OutboundMessage, error: str | None) -> None:
+        if self.on_permanent_failure is None:
+            return
+        try:
+            await self.on_permanent_failure(message, error or "")
+        except Exception as hook_exc:
+            logger.error("permanent failure hook error: %s", hook_exc)
 
     async def run_loop(self, interval: float = 5.0) -> None:
         logger.info("outbox worker started interval=%s", interval)

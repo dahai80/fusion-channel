@@ -103,7 +103,7 @@ Non-negotiable rules baked into the library (PRD §4.2 / §7.1):
 1. **Verification is mandatory at the SPI level** — an adapter class that does not implement `verify_request` cannot be registered (`ConfigError`).
 2. **Archive-first** — inbound messages are persisted with the raw payload before business processing; duplicates are counted, never dropped.
 3. **Rejected requests are archived too** (`RejectedEnvelope`) so attacks and lost messages are auditable.
-4. **Outbox pattern** — send intents enqueue first; the flush loop retries with `[30, 120, 600]`s backoff, 3 attempts max, then fires `on_permanent_failure` (the ai-family alert pattern).
+4. **Outbox pattern** — send intents enqueue first; the flush loop retries with `[30, 120, 600]`s backoff, 3 attempts max, then fires `on_permanent_failure` (the ai-family alert pattern). Records are CAS-claimed (`pending` → `sending` lease) so two workers never double-send; a crashed worker's lease expires and the record requeues; pending records older than 24h fail permanently.
 5. **Degradation is rendering, not business logic** — consumers always ask for a card; `CAN_CARDS=none` channels get the fallback text ("回复 同意 AP-123456"), and the reply parses back into the same `Interaction`.
 6. **Credentials never live in the library** — `CredentialProvider` interface with an AES-256-GCM file-backed default (0600 key, atomic writes); reads through it return masked values.
 7. **Fail closed** — verification/parse exceptions on attacker input reject-archive and return 4xx (never 500); webhook bodies over 1 MiB get 413; adapter error strings are secret-redacted before they reach logs or `SendResult`.
@@ -137,17 +137,19 @@ Every adapter declares `ChannelCapabilities` (CAN_RECEIVE / CAN_SEND / CAN_GROUP
 
 ```bash
 source /Users/dahai/fusion/.venv/bin/activate
-pytest tests/                          # 116 tests: crypto vectors, webhook E2E, outbox, matrix, hardening
+pytest tests/                          # 145 tests: crypto vectors, webhook E2E, outbox, matrix, hardening
 pytest tests/test_e2e_approval.py -v   # cross-channel approval acceptance
 ruff check . && ruff format --check .  # lint
 ```
 
 Test coverage highlights:
 
-- Real signature vectors for every channel (including Feishu/WeCom AES-CBC round-trips, Slack replay-window rejection, DingTalk ms-timestamp handling).
-- FastAPI TestClient E2E: signed webhook → verify → parse → dedup → archive → handler; bad signature → 403 + reject archive; duplicate → 200, no redispatch.
-- Cross-channel approval acceptance: the same `AP-123456` decision arrives via SMS text, Slack Block Kit button, DingTalk signed command, Telegram inline keyboard, WhatsApp text, WeCom encrypted callback, and Feishu group mention — one handler, one state machine.
-- Outbound E2E via `httpx.MockTransport`: Twilio/Feishu/Slack provider payload shapes asserted; `test_connection()` smoke-tested per adapter.
+- Real signature vectors for every channel (including Feishu/WeCom AES-CBC round-trips, Slack replay-window rejection, DingTalk ms-timestamp handling, Aliyun RFC3986 percent-encoding).
+- FastAPI TestClient E2E: signed webhook → verify → parse → dedup → archive → handler; bad signature → 403 + reject archive; duplicate → 200, no redispatch; internal errors → reject-archive + 400, never 500.
+- GET handshakes: WeCom `echostr` URL verification and WhatsApp `hub.challenge` echo (token-checked), via the router's GET route.
+- Delivery receipts (Twilio `MessageStatus`, WhatsApp `statuses`) are archived as receipts, never dispatched as messages; challenge retries always re-echo (never deduped).
+- Cross-channel approval acceptance: the same `AP-123456` decision arrives via SMS text, Slack Block Kit button, DingTalk signed command, Telegram inline keyboard, WhatsApp text, WeCom encrypted callback, Feishu group mention, and Feishu card button callback — one handler, one state machine.
+- Outbound E2E via `httpx.MockTransport`: Twilio/Feishu/Slack provider payload shapes asserted; `test_connection()` smoke-tested per adapter (DingTalk's is static — a robot send always lands in a real group).
 - Live provider calls require sandbox credentials and are marked `integration` (excluded by default).
 
 ## License

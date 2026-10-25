@@ -114,14 +114,20 @@ class SlackAppAdapter(HttpAdapterMixin, ChannelAdapter):
             )
         event = payload.get("event", {})
         # block_actions payloads carry type/user/channel at the top level;
-        # event_callback payloads nest them under "event".
+        # event_callback payloads nest them under "event". In block_actions
+        # "user" is an OBJECT ({id, name...}), in message events a string.
         event_type = event.get("type", "") or payload.get("type", "")
-        user = event.get("user") or payload.get("user", "")
+        user_raw = event.get("user") or payload.get("user", "")
+        user = user_raw.get("id", "") if isinstance(user_raw, dict) else user_raw
         raw_channel = event.get("channel") or payload.get("channel", "")
         channel_id = raw_channel.get("id", "") if isinstance(raw_channel, dict) else raw_channel
         channel_type = event.get("channel_type", "channel")
         text = event.get("text", "")
-        event_ts = event.get("ts", "") or payload.get("event_id", "")
+        # block_actions has no event_id; trigger_id is the per-interaction key.
+        if event_type == "block_actions":
+            message_id = payload.get("trigger_id", "")
+        else:
+            message_id = payload.get("event_id", "") or event.get("ts", "")
         # Strip <@U123> mention markup into mention identities.
         mentions = [
             ExternalIdentity(channel_id=self.channel_id, external_id=match)
@@ -133,11 +139,13 @@ class SlackAppAdapter(HttpAdapterMixin, ChannelAdapter):
             actions = payload.get("actions", [])
             if actions:
                 action = actions[0]
+                value = action.get("value", "")
+                # The renderer puts the business code directly in "value".
                 interaction = Interaction(
                     kind="button",
                     action=action.get("action_id", ""),
-                    message_id=payload.get("trigger_id", "") or event_ts,
-                    payload={"value": action.get("value", ""), "block_id": action.get("block_id", "")},
+                    message_id=message_id,
+                    payload={"value": value, "block_id": action.get("block_id", ""), "code": value},
                     actor=ExternalIdentity(channel_id=self.channel_id, external_id=user),
                     conversation=Conversation(
                         type="group" if channel_type in ("channel", "group") else "direct", id=channel_id
@@ -145,7 +153,7 @@ class SlackAppAdapter(HttpAdapterMixin, ChannelAdapter):
                 )
         return InboundEnvelope(
             channel_id=self.channel_id,
-            message_id=payload.get("event_id", "") or event_ts,
+            message_id=message_id,
             conversation=Conversation(
                 type="group" if channel_type in ("channel", "group") else "direct",
                 id=channel_id,

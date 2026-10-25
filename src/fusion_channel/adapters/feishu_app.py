@@ -16,6 +16,7 @@ from fusion_channel.models import (
     ExternalIdentity,
     GroupInfo,
     InboundEnvelope,
+    Interaction,
     MediaRef,
     OutboundMessage,
     SendResult,
@@ -175,6 +176,29 @@ class FeishuAppAdapter(HttpAdapterMixin, ChannelAdapter):
         inner = event.get("event", {})
         if not inner and "event" not in event:
             inner = event
+        event_type = header.get("event_type", "")
+        if event_type == "card.action.trigger":
+            # Interactive-card button callback. The renderer's button value is
+            # {"action": <semantic>, "code": <business code>}.
+            action_data = inner.get("action", {})
+            value = action_data.get("value", {})
+            value = value if isinstance(value, dict) else {}
+            operator = inner.get("operator", {}).get("operator_id", {})
+            actor_id = operator.get("open_id") or operator.get("user_id") or operator.get("union_id", "")
+            return InboundEnvelope(
+                channel_id=self.channel_id,
+                message_id=event_id or inner.get("delivery_id", ""),
+                conversation=Conversation(type="direct", id=actor_id),
+                sender=ExternalIdentity(channel_id=self.channel_id, external_id=actor_id),
+                interaction=Interaction(
+                    kind="button",
+                    action=str(value.get("action", "")),
+                    message_id=event_id,
+                    payload={"code": str(value.get("code", "")), "value": value},
+                    actor=ExternalIdentity(channel_id=self.channel_id, external_id=actor_id),
+                ),
+                raw=event,
+            )
         message = inner.get("message", {})
         chat_id = message.get("chat_id", "") or inner.get("chat_id", "")
         chat_type = message.get("chat_type", "p2p")

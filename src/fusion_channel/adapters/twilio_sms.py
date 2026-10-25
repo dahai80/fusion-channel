@@ -13,6 +13,7 @@ from fusion_channel.models import (
     InboundEnvelope,
     MediaRef,
     OutboundMessage,
+    Receipt,
     SendResult,
     TestResult,
     VerifyResult,
@@ -54,9 +55,13 @@ class TwilioSmsAdapter(HttpAdapterMixin, ChannelAdapter):
     def verify_request(self, request: ChannelRequest) -> VerifyResult:
         signature = request.header("X-Twilio-Signature")
         token = self.credentials.get("auth_token", "")
-        ok = verify_twilio_signature(request.url, request.form, signature, token)
+        # Behind a proxy the internally seen URL differs from the public URL
+        # Twilio signed; config extra "external_url" overrides it (must be
+        # the full public webhook URL).
+        url = str(self.config.get("external_url") or request.url)
+        ok = verify_twilio_signature(url, request.form, signature, token)
         if not ok:
-            logger.warning("twilio signature rejected channel=%s url=%s", self.channel_id, request.url)
+            logger.warning("twilio signature rejected channel=%s url=%s", self.channel_id, url.split("?")[0])
         return VerifyResult(ok=ok, reason="" if ok else "signature_mismatch")
 
     def parse_inbound(self, request: ChannelRequest) -> InboundEnvelope:
@@ -65,6 +70,22 @@ class TwilioSmsAdapter(HttpAdapterMixin, ChannelAdapter):
         from_phone = params.get("From", "")
         to_phone = params.get("To", "")
         body = params.get("Body", "")
+        status = params.get("MessageStatus", "")
+        if status and not body:
+            # Status callback: a delivery receipt, never a message.
+            return InboundEnvelope(
+                channel_id=self.channel_id,
+                message_id=sid,
+                conversation=Conversation(type="direct", id=f"{from_phone}->{to_phone}"),
+                sender=ExternalIdentity(channel_id=self.channel_id, external_id=_normalize_phone(from_phone)),
+                receipt=Receipt(
+                    channel_id=self.channel_id,
+                    message_id=sid,
+                    status=status,
+                    raw={"params": {k: v[:MAX_STORED_PARAM] for k, v in params.items()}},
+                ),
+                raw={"params": {k: v[:MAX_STORED_PARAM] for k, v in params.items()}},
+            )
         try:
             num_media = int(params.get("NumMedia", "0"))
         except ValueError:

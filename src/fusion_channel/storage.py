@@ -105,6 +105,16 @@ class ChannelStore:
     async def update_outbound(self, record: OutboxRecord) -> None:
         raise NotImplementedError
 
+    async def claim_outbound(self, record_id: int, lease_until: str) -> bool:
+        # CAS: pending -> sending only if still pending; False if another
+        # worker claimed it first (double-send guard).
+        raise NotImplementedError
+
+    async def requeue_stale_sending(self, now: str) -> int:
+        # Crash recovery: 'sending' records whose lease (next_retry_at) has
+        # expired go back to 'pending'.
+        raise NotImplementedError
+
     async def save_receipt(self, channel_id: str, message_id: str, status: str, payload: dict) -> None:
         raise NotImplementedError
 
@@ -179,6 +189,25 @@ class MemoryStore(ChannelStore):
             provider_message_id=record.provider_message_id,
             last_error=record.last_error,
         )
+
+    async def claim_outbound(self, record_id: int, lease_until: str) -> bool:
+        row = self.outbox.get(record_id)
+        if row is None or row["status"] != "pending":
+            return False
+        row["status"] = "sending"
+        row["next_retry_at"] = lease_until
+        return True
+
+    async def requeue_stale_sending(self, now: str) -> int:
+        count = 0
+        for row in self.outbox.values():
+            if row["status"] == "sending" and row["next_retry_at"] <= now:
+                row["status"] = "pending"
+                row["next_retry_at"] = now
+                count += 1
+        if count:
+            logger.warning("requeued stale sending records count=%d", count)
+        return count
 
     async def save_receipt(self, channel_id: str, message_id: str, status: str, payload: dict) -> None:
         self.receipts.append(
@@ -280,6 +309,24 @@ class SqliteStore(ChannelStore):
             ),
         )
         await self.db.commit()
+
+    async def claim_outbound(self, record_id: int, lease_until: str) -> bool:
+        cursor = await self.db.execute(
+            "UPDATE fc_outbound SET status = 'sending', next_retry_at = ? WHERE id = ? AND status = 'pending'",
+            (lease_until, record_id),
+        )
+        await self.db.commit()
+        return cursor.rowcount > 0
+
+    async def requeue_stale_sending(self, now: str) -> int:
+        cursor = await self.db.execute(
+            "UPDATE fc_outbound SET status = 'pending', next_retry_at = ? WHERE status = 'sending' AND next_retry_at <= ?",
+            (now, now),
+        )
+        await self.db.commit()
+        if cursor.rowcount:
+            logger.warning("requeued stale sending records count=%d", cursor.rowcount)
+        return cursor.rowcount
 
     async def save_receipt(self, channel_id: str, message_id: str, status: str, payload: dict) -> None:
         await self.db.execute(

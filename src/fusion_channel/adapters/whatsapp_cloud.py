@@ -14,6 +14,7 @@ from fusion_channel.models import (
     Interaction,
     MediaRef,
     OutboundMessage,
+    Receipt,
     SendResult,
     TestResult,
     VerifyResult,
@@ -56,6 +57,18 @@ class WhatsAppCloudAdapter(HttpAdapterMixin, ChannelAdapter):
             logger.warning("whatsapp signature rejected channel=%s", self.channel_id)
         return VerifyResult(ok=ok, reason="" if ok else "signature_mismatch")
 
+    def handle_verification_get(self, request: ChannelRequest) -> WebhookResponse:
+        # Webhook subscription handshake: GET with hub.mode/hub.verify_token/
+        # hub.challenge — echo the challenge only when the token matches.
+        from urllib.parse import parse_qs, urlparse
+
+        params = {k: v[-1] for k, v in parse_qs(urlparse(request.url).query).items()}
+        expected = self.credentials.get("verify_token", "")
+        if params.get("hub.mode") == "subscribe" and expected and params.get("hub.verify_token") == expected:
+            return WebhookResponse(status_code=200, body=params.get("hub.challenge", ""), media_type="text/plain")
+        logger.warning("whatsapp hub.challenge rejected channel=%s", self.channel_id)
+        return WebhookResponse(status_code=403, body="forbidden", media_type="text/plain")
+
     def parse_inbound(self, request: ChannelRequest) -> InboundEnvelope:
         payload = request.json_body or {}
         entry = (payload.get("entry") or [{}])[0]
@@ -64,14 +77,22 @@ class WhatsAppCloudAdapter(HttpAdapterMixin, ChannelAdapter):
         messages = value.get("messages") or []
         statuses = value.get("statuses") or []
         if not messages:
-            # Status webhook = delivery receipt, not a message.
+            # Status webhook = delivery receipt, archived via
+            # envelope.receipt — never dispatched as a phantom message.
             status = statuses[0] if statuses else {}
             message_id = status.get("id", "") or payload.get("field", "status")
+            status_value = status.get("status", "") or "unknown"
             return InboundEnvelope(
                 channel_id=self.channel_id,
                 message_id=f"status:{message_id}",
                 conversation=Conversation(type="direct", id="status"),
                 sender=ExternalIdentity(channel_id=self.channel_id, external_id="whatsapp"),
+                receipt=Receipt(
+                    channel_id=self.channel_id,
+                    message_id=message_id,
+                    status=status_value,
+                    raw=payload,
+                ),
                 raw=payload,
             )
         message = messages[0]
