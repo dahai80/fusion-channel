@@ -1,0 +1,35 @@
+# fusion-channel example configuration (PRD §4.3 data-driven model)
+channels:
+  - id: family_twilio
+    adapter: twilio_sms
+    credentials:
+      account_sid: env:FUSION_CHANNEL_TWILIO_ACCOUNT_SID
+      auth_token: family_twilio:auth_token      # CredentialProvider key
+      from_number: env:FUSION_CHANNEL_TWILIO_FROM
+    rate_limit:
+      per_minute: 60
+    inbound:
+      verify: required        # required | disabled (test only)
+      archive: full           # full | metadata-only | off
+
+  - id: family_feishu
+    adapter: feishu_app
+    credentials:
+      app_id: family_feishu:app_id
+      app_secret: family_feishu:app_secret
+      encrypt_key: family_feishu:encrypt_key
+      verification_token: family_feishu:verification_token
+    groups: ["家庭群"]          # watched conversations; others archived and ignored
+    mentions_required: true   # group messages must @mention the bot
+
+  - id: home_dingtalk
+    adapter: dingtalk_robot
+    credentials:
+      access_token: home_dingtalk:access_token
+      secret: home_dingtalk:secret   # HMAC-SHA256 signing mode required
+
+identity_bindings:
+  - identity: "identity:u_123"        # fusion-identity account
+    bindings:
+      - {channel: family_twilio, external_id: "+15550000001"}
+      - {channel: family_feishu, external_id: "ou_xxx"}
