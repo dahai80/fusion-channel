@@ -198,13 +198,14 @@ class ChannelRegistry:
 
     async def send(self, channel_id: str, conversation, spec: dict | None = None, **kwargs) -> int | None:
         # Outbox semantics: returns the outbox id, or None on dedup hit.
+        from fusion_channel.models import Conversation
+
         data = dict(spec or {})
         data.update(kwargs)
         data.setdefault("channel_id", channel_id)
-        data.setdefault("conversation", conversation if not isinstance(conversation, dict) else None)
+        if conversation is not None:
+            data.setdefault("conversation", conversation)
         if isinstance(data.get("conversation"), dict):
-            from fusion_channel.models import Conversation
-
             data["conversation"] = Conversation.model_validate(data["conversation"])
         message = OutboundMessage.model_validate(data)
         adapter = self.adapters.get(channel_id)

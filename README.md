@@ -43,19 +43,22 @@ from fusion_channel.storage import SqliteStore
 store = SqliteStore("channel.db")
 await store.init()
 registry = ChannelRegistry.from_config(
-    "channels.yaml",                 # PRD §4.3 data-driven config
+    "channels.yaml",  # PRD §4.3 data-driven config
     credentials=AESGCMCredentialProvider("data/secrets"),
     store=store,
 )
 
 # --- inbound: FastAPI webhook in one line ---
 from fusion_channel.fastapi import build_channel_router
-app.include_router(build_channel_router(registry))   # POST /webhook/{channel_id}
+
+app.include_router(build_channel_router(registry))  # POST /webhook/{channel_id}
+
 
 # --- handlers: card buttons and text commands converge here ---
 async def on_interaction(interaction):
     code = interaction.payload.get("code") or interaction.payload.get("value") or ""
-    print("approval", code, interaction.action)      # one state machine, all channels
+    print("approval", code, interaction.action)  # one state machine, all channels
+
 
 registry.on_interaction(on_interaction)
 registry.register_command("approve", ["同意", "approve"], code_required=True)
@@ -67,12 +70,13 @@ await registry.send(
     "family_twilio",
     {"type": "direct", "id": "+15550000001->+15550000000"},
     card=ApprovalCard(
-        title="审批 AP-123456", code="AP-123456", body="New caregiver profile",
-        actions=[CardAction(action="approve", label="同意"),
-                 CardAction(action="reject", label="拒绝")],
+        title="审批 AP-123456",
+        code="AP-123456",
+        body="New caregiver profile",
+        actions=[CardAction(action="approve", label="同意"), CardAction(action="reject", label="拒绝")],
     ),
 )
-sent = await registry.outbox.flush_once()   # or run_loop() in background
+sent = await registry.outbox.flush_once()  # or run_loop() in background
 
 # --- identity: external id -> fusion-identity account ---
 user = registry.identify("family_twilio", "+15550000001")

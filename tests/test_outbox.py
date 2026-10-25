@@ -129,6 +129,25 @@ async def test_registry_send_routes_through_outbox(registry):
     assert seen[0].text == "提醒：明早 9 点有会"
 
 
+async def test_registry_send_accepts_dict_conversation(registry):
+    seen = []
+
+    async def fake_send(message):
+        seen.append(message)
+        return SendResult(ok=True, provider_message_id="X1")
+
+    registry.adapters["family_twilio"].send = fake_send
+    outbox_id = await registry.send(
+        "family_twilio",
+        {"type": "direct", "id": "+15550000002->+15550000001"},
+        text="dict conversation",
+    )
+    assert outbox_id is not None
+    sent = await registry.outbox.flush_once()
+    assert sent == 1
+    assert seen[0].conversation.id == "+15550000002->+15550000001"
+
+
 async def test_registry_send_card_degrades_on_sms(registry):
     card = ApprovalCard(
         title="审批 AP-123456",
