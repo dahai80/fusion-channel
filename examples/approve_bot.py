@@ -38,7 +38,9 @@ async def main() -> None:
     registry.register_command("reject", ["拒绝", "reject"], code_required=True)
 
     async def on_message(envelope):
-        logging.info("message channel=%s from=%s text=%s", envelope.channel_id, envelope.sender.external_id, envelope.text[:40])
+        logging.info(
+            "message channel=%s from=%s text=%s", envelope.channel_id, envelope.sender.external_id, envelope.text[:40]
+        )
 
     registry.on_message(on_message)
 
