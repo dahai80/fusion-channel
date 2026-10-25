@@ -237,13 +237,12 @@ def test_approval_converges_across_channels(client, registry):
 
     inner = "<xml><ToUserName>corp</ToUserName><FromUserName>boss</FromUserName><MsgType>text</MsgType><Content>同意 AP-123456</Content><MsgId>9</MsgId></xml>"
     encrypted = wecom_encrypt("A" * 43, inner, "corp-id")
-    signature = wecom_signature("wecom-callback-token", "1700000000", "n1", encrypted)
+    ts = str(int(time.time()))
+    signature = wecom_signature("wecom-callback-token", ts, "n1", encrypted)
     assert (
         client.post(
             "/webhook/home_wecom",
-            content=json.dumps(
-                {"encrypt": encrypted, "msg_signature": signature, "timestamp": "1700000000", "nonce": "n1"}
-            ),
+            content=json.dumps({"encrypt": encrypted, "msg_signature": signature, "timestamp": ts, "nonce": "n1"}),
             headers={"Content-Type": "application/json"},
         ).status_code
         == 200
@@ -341,7 +340,8 @@ async def test_outbound_feishu_sends_interactive_card(registry):
     sent = await registry.outbox.flush_once()
     assert sent == 1
     assert captured["json"]["msg_type"] == "interactive"
-    assert captured["json"]["content"]["header"]["title"]["content"] == "审批 AP-123456"
+    card = json.loads(captured["json"]["content"])
+    assert card["header"]["title"]["content"] == "审批 AP-123456"
 
 
 async def test_outbound_slack_sends_block_kit(registry):
@@ -383,9 +383,10 @@ async def test_test_connection_mocked(registry):
 
 async def test_group_ops_feishu_mocked(registry):
     def router(request: httpx.Request) -> httpx.Response:
-        if "tenant_access_token" in str(request.url):
+        url = str(request.url)
+        if "tenant_access_token" in url:
             return httpx.Response(200, json={"code": 0, "tenant_access_token": "t-1", "expire": 7200})
-        if "chats/" in str(request.url) and request.url.params.get("page_size"):
+        if request.url.params.get("page_size") and "/members" not in url:
             return httpx.Response(200, json={"code": 0, "data": {"items": [{"chat_id": "oc_1", "name": "家庭群"}]}})
         return httpx.Response(200, json={"code": 0, "data": {"name": "家庭群"}})
 

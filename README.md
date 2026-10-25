@@ -106,6 +106,14 @@ Non-negotiable rules baked into the library (PRD §4.2 / §7.1):
 4. **Outbox pattern** — send intents enqueue first; the flush loop retries with `[30, 120, 600]`s backoff, 3 attempts max, then fires `on_permanent_failure` (the ai-family alert pattern).
 5. **Degradation is rendering, not business logic** — consumers always ask for a card; `CAN_CARDS=none` channels get the fallback text ("回复 同意 AP-123456"), and the reply parses back into the same `Interaction`.
 6. **Credentials never live in the library** — `CredentialProvider` interface with an AES-256-GCM file-backed default (0600 key, atomic writes); reads through it return masked values.
+7. **Fail closed** — verification/parse exceptions on attacker input reject-archive and return 4xx (never 500); webhook bodies over 1 MiB get 413; adapter error strings are secret-redacted before they reach logs or `SendResult`.
+8. **Identity gate** — set `require_bound_identity: true` on a channel to dispatch interactions (card buttons + text commands) only for senders present in `identity_bindings`; unbound senders get 403 `identity_not_bound` plus an audit event.
+
+Config details:
+
+- **Credential refs**: each credential value may be `env:VAR_NAME` (read from the environment), a `CredentialProvider` key, or a plain literal (used as-is when no provider entry matches).
+- **Archive modes**: `inbound.archive: full` (default, raw payload kept) / `metadata-only` (content and raw payload stripped at archive time; handlers still see the full envelope) / `off` (dedup record only).
+- **Replay windows**: Slack / DingTalk / WeCom signatures older than 300s are rejected.
 
 ## Group & bot capabilities
 
@@ -129,7 +137,7 @@ Every adapter declares `ChannelCapabilities` (CAN_RECEIVE / CAN_SEND / CAN_GROUP
 
 ```bash
 source /Users/dahai/fusion/.venv/bin/activate
-pytest tests/                          # 48 tests: crypto vectors, webhook E2E, outbox, matrix
+pytest tests/                          # 116 tests: crypto vectors, webhook E2E, outbox, matrix, hardening
 pytest tests/test_e2e_approval.py -v   # cross-channel approval acceptance
 ruff check . && ruff format --check .  # lint
 ```

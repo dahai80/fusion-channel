@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import hmac
+import json
 import logging
 import time
 
@@ -121,9 +122,7 @@ class TencentSmsAdapter(HttpAdapterMixin, ChannelAdapter):
         rendered = message.meta.get("rendered") or {}
         text = rendered.get("text") or message.text
         phone = message.conversation.id.split("->")[0] if "->" in message.conversation.id else message.conversation.id
-        import json as _json
-
-        body = _json.dumps(
+        body = json.dumps(
             {
                 "PhoneNumberSet": [f"+86{phone.lstrip('+86')}"],
                 "SmsSdkAppId": self.credentials.get("sdk_app_id", ""),

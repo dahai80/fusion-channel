@@ -197,12 +197,13 @@ async def test_slack_block_action_interaction(registry):
         "actions": [{"action_id": "approve", "value": "AP-123456", "block_id": "b1"}],
     }
     body = json.dumps(payload)
+    timestamp = str(int(time.time()))
     request = ChannelRequest(
         url="https://example.com/webhook/team_slack",
         headers={
             "content-type": "application/json",
-            "x-slack-signature": slack_sign(str(int(time.time())), body),
-            "x-slack-request-timestamp": str(int(time.time())),
+            "x-slack-signature": slack_sign(timestamp, body),
+            "x-slack-request-timestamp": timestamp,
         },
         body=body.encode(),
         json_body=payload,
@@ -219,8 +220,10 @@ async def test_verify_disabled_still_processes_but_logs(registry, caplog):
     registry.channels["family_twilio"].inbound.verify = "disabled"
     params = {"MessageSid": "SM007", "From": "+15550000002", "Body": "no sig"}
     request = twilio_request(params, sign="")
-    result = await registry.handle_inbound("family_twilio", request)
+    with caplog.at_level("WARNING", logger="fusion_channel.registry"):
+        result = await registry.handle_inbound("family_twilio", request)
     assert bool(result)
+    assert any("INSECURE" in rec.message for rec in caplog.records)
 
 
 async def test_dingtalk_signed_callback(registry):
@@ -308,7 +311,7 @@ async def test_wecom_signed_callback(registry):
 
     inner = "<xml><ToUserName>corp</ToUserName><FromUserName>zhangsan</FromUserName><MsgType>text</MsgType><Content>同意 AP-9</Content><MsgId>1</MsgId></xml>"
     encrypted = wecom_encrypt("A" * 43, inner, "corp-id")
-    timestamp, nonce = "1700000000", "n1"
+    timestamp, nonce = str(int(time.time())), "n1"
     signature = wecom_signature("wecom-callback-token", timestamp, nonce, encrypted)
     payload = {"encrypt": encrypted, "msg_signature": signature, "timestamp": timestamp, "nonce": nonce}
     body = json.dumps(payload)

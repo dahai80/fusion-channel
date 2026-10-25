@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import hmac
+import json
 import logging
+import re
+import time
 
 import httpx
 
 from fusion_channel.adapters import HttpAdapterMixin, register
 from fusion_channel.capabilities import matrix_capabilities
 from fusion_channel.models import (
-    Card,
     ChannelRequest,
     Conversation,
     ExternalIdentity,
@@ -68,15 +71,6 @@ class FeishuGroupOps(GroupOps):
         ]
         return GroupInfo(group_id=group_id, name=data.get("name", ""), members=members)
 
-    async def broadcast(self, conversation, text: str) -> SendResult:
-        message = OutboundMessage(
-            channel_id=self.adapter.channel_id,
-            conversation=conversation,
-            text=text,
-            meta={"rendered": {"text": text, "card_payload": None, "used_fallback": False}},
-        )
-        return await self.adapter.send(message)
-
 
 @register
 class FeishuAppAdapter(HttpAdapterMixin, ChannelAdapter):
@@ -101,9 +95,9 @@ class FeishuAppAdapter(HttpAdapterMixin, ChannelAdapter):
         ]
 
     async def tenant_access_token(self) -> str:
-        cached = self.config.get("_tenant_token")
-        if cached:
-            return cached
+        cached = getattr(self, "_token_cache", None)
+        if cached and cached[1] > time.monotonic():
+            return cached[0]
         async with self._client() as client:
             resp = await client.post(
                 f"{FEISHU_BASE}/auth/v3/tenant_access_token/internal",
@@ -118,7 +112,10 @@ class FeishuAppAdapter(HttpAdapterMixin, ChannelAdapter):
         if payload.get("code") != 0:
             raise RuntimeError(f"feishu token error code={payload.get('code')} msg={payload.get('msg')}")
         token = payload.get("tenant_access_token", "")
-        self.config["_tenant_token"] = token
+        expire = int(payload.get("expire", 120))
+        # Refresh 120s before server-side expiry so long-lived processes
+        # never send with a stale token.
+        self._token_cache = (token, time.monotonic() + max(60, expire - 120))
         return token
 
     def _unwrap(self, resp: httpx.Response) -> dict:
@@ -135,18 +132,31 @@ class FeishuAppAdapter(HttpAdapterMixin, ChannelAdapter):
         return feishu_decrypt(self.credentials.get("encrypt_key", ""), encrypted) if encrypted else body
 
     def verify_request(self, request: ChannelRequest) -> VerifyResult:
+        # Hard rules: verification_token must be configured, the event must
+        # arrive encrypted, and the token must match. An unconfigured token
+        # rejects everything instead of accepting everything.
+        expected = self.credentials.get("verification_token", "")
+        if not expected:
+            logger.error("feishu verification_token not configured channel=%s — rejecting", self.channel_id)
+            return VerifyResult(ok=False, reason="verification_token_missing")
+        body = request.json_body
+        if not isinstance(body, dict) or not body.get("encrypt"):
+            logger.warning("feishu event not encrypted channel=%s", self.channel_id)
+            return VerifyResult(ok=False, reason="not_encrypted")
         try:
             event = self._decrypt_event(request)
         except Exception as exc:
             logger.warning("feishu decrypt failed channel=%s err=%s", self.channel_id, exc)
             return VerifyResult(ok=False, reason="decrypt_failed")
-        token = event.get("token", "") if isinstance(event, dict) else ""
-        expected = self.credentials.get("verification_token", "")
-        if token and expected and token != expected:
+        # url_verification carries the token top-level; event v2 nests it in header.
+        token = ""
+        if isinstance(event, dict):
+            token = event.get("token") or (event.get("header") or {}).get("token", "")
+        if not token:
+            return VerifyResult(ok=False, reason="token_missing")
+        if not hmac.compare_digest(expected.encode("utf-8"), token.encode("utf-8")):
             logger.warning("feishu token mismatch channel=%s", self.channel_id)
             return VerifyResult(ok=False, reason="token_mismatch")
-        if expected and not token:
-            return VerifyResult(ok=False, reason="token_missing")
         return VerifyResult(ok=True)
 
     def parse_inbound(self, request: ChannelRequest) -> InboundEnvelope:
@@ -170,18 +180,14 @@ class FeishuAppAdapter(HttpAdapterMixin, ChannelAdapter):
         chat_type = message.get("chat_type", "p2p")
         msg_type = message.get("message_type", "text")
         content_raw = message.get("content", "{}")
-        import json as _json
-
         try:
-            content = _json.loads(content_raw) if isinstance(content_raw, str) else content_raw
+            content = json.loads(content_raw) if isinstance(content_raw, str) else content_raw
         except ValueError:
             content = {}
         text = content.get("text", "") if msg_type == "text" else ""
         if text:
             # Feishu at-mentions embed <at user_id="...">Name</at> in text.
-            import re as _re
-
-            text = _re.sub(r"<at [^>]*>[^<]*</at>", "", text).strip()
+            text = re.sub(r"<at [^>]*>[^<]*</at>", "", text).strip()
         sender_id = (
             message.get("sender", "").get("id")
             if isinstance(message.get("sender"), dict)
@@ -212,10 +218,8 @@ class FeishuAppAdapter(HttpAdapterMixin, ChannelAdapter):
     def webhook_response(self, request: ChannelRequest, envelope) -> WebhookResponse:
         if envelope is not None and envelope.message_id == "url_verification":
             challenge = envelope.raw.get("challenge", "")
-            import json as _json
-
             return WebhookResponse(
-                status_code=200, body=_json.dumps({"challenge": challenge}), media_type="application/json"
+                status_code=200, body=json.dumps({"challenge": challenge}), media_type="application/json"
             )
         return WebhookResponse(status_code=200, body="ok", media_type="text/plain")
 
@@ -225,10 +229,18 @@ class FeishuAppAdapter(HttpAdapterMixin, ChannelAdapter):
         receive_id = message.conversation.id
         token = await self.tenant_access_token()
         if card_payload and card_payload.get("msg_type") == "interactive":
-            body = {"receive_id": receive_id, "msg_type": "interactive", "content": _json_dumps(card_payload["card"])}
+            body = {
+                "receive_id": receive_id,
+                "msg_type": "interactive",
+                "content": json.dumps(card_payload["card"], ensure_ascii=False),
+            }
         else:
             text = rendered.get("text") or message.text
-            body = {"receive_id": receive_id, "msg_type": "text", "content": _json_dumps({"text": text})}
+            body = {
+                "receive_id": receive_id,
+                "msg_type": "text",
+                "content": json.dumps({"text": text}, ensure_ascii=False),
+            }
         try:
             async with self._client() as client:
                 resp = await client.post(
@@ -255,14 +267,3 @@ class FeishuAppAdapter(HttpAdapterMixin, ChannelAdapter):
 
     async def group_ops(self) -> GroupOps:
         return FeishuGroupOps(self)
-
-    def render_card(self, card: Card):
-        from fusion_channel.cards import DEFAULT_RENDERER
-
-        return DEFAULT_RENDERER.render(self.capabilities(), self.adapter_id(), card)
-
-
-def _json_dumps(obj) -> str:
-    import json
-
-    return json.dumps(obj, ensure_ascii=False)

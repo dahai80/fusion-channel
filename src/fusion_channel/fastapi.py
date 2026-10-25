@@ -12,6 +12,10 @@ from fusion_channel.registry import ChannelRegistry
 
 logger = logging.getLogger(__name__)
 
+# Webhook bodies are provider event payloads (Feishu/WeCom ciphertext included);
+# 1 MiB is far above any legitimate event and caps memory-exhaustion DoS.
+MAX_BODY_BYTES = 1_048_576
+
 
 async def build_channel_request(request: Request) -> ChannelRequest:
     raw_body = await request.body()
@@ -53,7 +57,14 @@ def build_channel_router(registry: ChannelRegistry, prefix: str = "/webhook") ->
 
     @router.post(prefix + "/{channel_id}")
     async def channel_webhook(channel_id: str, request: Request):
+        content_length = request.headers.get("content-length", "")
+        if content_length.isdigit() and int(content_length) > MAX_BODY_BYTES:
+            logger.warning("webhook body too large channel=%s bytes=%s", channel_id, content_length)
+            return JSONResponse({"error": "payload too large"}, status_code=413)
         channel_request = await build_channel_request(request)
+        if len(channel_request.body) > MAX_BODY_BYTES:
+            logger.warning("webhook body too large channel=%s bytes=%d", channel_id, len(channel_request.body))
+            return JSONResponse({"error": "payload too large"}, status_code=413)
         result = await registry.handle_inbound(channel_id, channel_request)
         return _to_response(result.response)
 

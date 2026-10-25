@@ -54,7 +54,7 @@ class CardRenderer:
                     "tag": "button",
                     "text": {"tag": "plain_text", "content": action.label},
                     "type": "primary" if action.action == "approve" else "danger",
-                    "value": {"action": action.action, "code": getattr(card, "code", "")},
+                    "value": {"action": action.action, "code": card.code},
                 }
                 for action in card.actions
             ],
@@ -71,7 +71,7 @@ class CardRenderer:
             {
                 "title": action.label,
                 "actionURL": "",
-                "value": {"action": action.action, "code": getattr(card, "code", "")},
+                "value": {"action": action.action, "code": card.code},
             }
             for action in card.actions
         ]
@@ -95,7 +95,7 @@ class CardRenderer:
                             "type": "button",
                             "text": {"type": "plain_text", "text": action.label},
                             "action_id": action.action,
-                            "value": getattr(card, "code", ""),
+                            "value": card.code,
                             "style": "primary" if action.action == "approve" else "danger",
                         }
                         for action in card.actions
@@ -106,21 +106,20 @@ class CardRenderer:
 
     def _telegram_keyboard(self, card: Card) -> dict:
         keyboard = [
-            [
-                {"text": action.label, "callback_data": f"{action.action}:{getattr(card, 'code', '')}"}
-                for action in card.actions
-            ]
+            [{"text": action.label, "callback_data": f"{action.action}:{card.code}"} for action in card.actions]
         ]
         return {"reply_markup": {"inline_keyboard": keyboard}}
 
     def _wecom_textcard(self, card: Card) -> dict:
         # WeCom application message text_card: partial card support.
+        if not card.url:
+            logger.warning("wecom textcard without click url, using placeholder title=%s", card.title)
         return {
             "msgtype": "textcard",
             "textcard": {
                 "title": card.title,
                 "description": card.body,
-                "url": card.meta_url if hasattr(card, "meta_url") else "https://example.invalid/card",
+                "url": card.url or "https://example.invalid/card",
                 "btntxt": card.actions[0].label if card.actions else "查看",
             },
         }

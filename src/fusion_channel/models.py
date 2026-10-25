@@ -45,6 +45,8 @@ class Card(BaseModel):
     body: str = ""
     actions: list[CardAction] = Field(default_factory=list)
     fallback_text: str = ""  # used when CAN_CARDS == "none"
+    code: str = ""  # business code (e.g. "AP-123456") echoed in buttons and command parse
+    url: str = ""  # click-through url for textcard-style channels (WeCom)
 
     def build_fallback_text(self) -> str:
         if self.fallback_text:

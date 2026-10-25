@@ -127,8 +127,11 @@ class AESGCMCredentialProvider(CredentialProvider):
         self.secrets_dir.mkdir(parents=True, exist_ok=True)
         blob = self._encrypt(value.encode("utf-8"))
         tmp = self._path(name).with_suffix(".enc.tmp")
-        tmp.write_bytes(blob)
-        os.chmod(tmp, 0o600)
+        # Create with 0600 up front — no window where the ciphertext blob is
+        # group/world-readable (matches the key-file pattern in _load_key).
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(blob)
         tmp.replace(self._path(name))
         logger.info("channel secret saved name=%s", name)
 

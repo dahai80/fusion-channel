@@ -95,12 +95,17 @@ def test_feishu_encrypt_decrypt_roundtrip():
 
 def test_wecom_signature_and_decrypt_roundtrip():
     encrypt_xml = wecom_encrypt("A" * 43, "<xml><Content>hello</Content></xml>", "corp-id")
-    timestamp, nonce = "1234567890", "nonce1"
+    timestamp, nonce = str(int(time.time())), "nonce1"
     signature = wecom_signature("wecom-callback-token", timestamp, nonce, encrypt_xml)
     assert verify_wecom_signature("wecom-callback-token", timestamp, nonce, encrypt_xml, signature)
     assert not verify_wecom_signature("wrong-token", timestamp, nonce, encrypt_xml, signature)
+    assert not verify_wecom_signature("wecom-callback-token", "1234567890", nonce, encrypt_xml, signature)
     plain = wecom_decrypt("A" * 43, encrypt_xml)
     assert plain.decode("utf-8") == "<xml><Content>hello</Content></xml>"
+    # receiveid validation: matching corp passes, mismatched raises
+    assert wecom_decrypt("A" * 43, encrypt_xml, expected_receive_id="corp-id") == plain
+    with pytest.raises(ValueError):
+        wecom_decrypt("A" * 43, encrypt_xml, expected_receive_id="other-corp")
 
 
 def test_generic_hmac_hex_roundtrip():

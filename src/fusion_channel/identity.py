@@ -39,8 +39,15 @@ class IdentityMapper:
         return list(self._by_identity.get(identity_id, []))
 
     def load(self, bindings: list[dict]) -> None:
+        # Two accepted shapes: the documented YAML grouping
+        # ({identity, bindings: [{channel, external_id}]}) and a flat
+        # [{identity, channel, external_id}] list.
         for item in bindings:
-            self.bind_identity(item["identity"], item["channel"], item["external_id"])
+            if "bindings" in item:
+                for binding in item["bindings"]:
+                    self.bind_identity(item["identity"], binding["channel"], binding["external_id"])
+            else:
+                self.bind_identity(item["identity"], item["channel"], item["external_id"])
 
     def assert_bound_identity(self, channel_id: str, external_id: str, identity_id: str | None = None) -> str:
         # Two-factor primitive for sensitive commands (PRD §7.1):

@@ -106,6 +106,14 @@ AuditHook          CardRenderer（按 CAN_CARDS 降级）
 4. **出站走 outbox**——发送意图先入队；flush 循环按 `[30, 120, 600]` 秒退避重试，最多 3 次，之后触发 `on_permanent_failure`（ai-family 告警模式）。
 5. **降级是渲染问题，不是业务问题**——消费应用永远说"发卡片"；`CAN_CARDS=none` 的通道自动渲染兜底文本（"回复 同意 AP-123456"），回复再解析回同一个 `Interaction`。
 6. **凭据不进库**——`CredentialProvider` 接口 + AES-256-GCM 文件默认实现（0600 密钥、原子写入）；describe 只回掩码。
+7. **失败即关闭**——攻击者输入导致验签/解析抛异常时拒收留档并回 4xx（绝不 500）；webhook 请求体超 1 MiB 返回 413；适配器错误字符串先脱敏再进日志或 `SendResult`。
+8. **身份门禁**——通道配置 `require_bound_identity: true` 后，交互（卡片按钮 + 文本指令）只对 `identity_bindings` 中已绑定的发送者派发；未绑定返回 403 `identity_not_bound` 并记审计事件。
+
+配置细节：
+
+- **凭据引用**：每个凭据值可写 `env:变量名`（从环境变量读取）、`CredentialProvider` 的 key，或直接写明文（provider 无匹配时按字面值使用）。
+- **归档模式**：`inbound.archive: full`（默认，保留原始载荷）/ `metadata-only`（归档时剥离内容与原始载荷；handler 仍拿到完整 envelope）/ `off`（只留去重记录）。
+- **重放窗口**：Slack / 钉钉 / 企微签名超过 300 秒即拒绝。
 
 ## 群组与机器人
 
@@ -129,7 +137,7 @@ AuditHook          CardRenderer（按 CAN_CARDS 降级）
 
 ```bash
 source /Users/dahai/fusion/.venv/bin/activate
-pytest tests/                          # 48 项测试：密码学向量、webhook E2E、outbox、矩阵
+pytest tests/                          # 116 项测试：密码学向量、webhook E2E、outbox、矩阵、加固
 pytest tests/test_e2e_approval.py -v   # 跨通道审批验收
 ruff check . && ruff format --check .  # lint
 ```
