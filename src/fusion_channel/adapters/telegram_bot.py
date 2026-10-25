@@ -119,10 +119,10 @@ class TelegramBotAdapter(HttpAdapterMixin, ChannelAdapter):
         mentions: list[ExternalIdentity] = []
         for entity in entities:
             if entity.get("type") == "mention":
-                offset, length = entity.get("offset", 0), entity.get("length", 0)
-                mentions.append(
-                    ExternalIdentity(channel_id=self.channel_id, external_id=text[offset : offset + length])
-                )
+                # Entity offsets/lengths are UTF-16 code units, not Python
+                # str indices — slice on the UTF-16 encoding, never the text.
+                mention = _utf16_slice(text, entity.get("offset", 0), entity.get("length", 0))
+                mentions.append(ExternalIdentity(channel_id=self.channel_id, external_id=mention.lstrip("@")))
         media: list[MediaRef] = []
         for media_key in ("photo", "document", "audio", "video", "voice"):
             if media_key in message:
@@ -191,3 +191,8 @@ class TelegramBotAdapter(HttpAdapterMixin, ChannelAdapter):
 
     async def group_ops(self) -> GroupOps:
         return TelegramGroupOps(self)
+
+
+def _utf16_slice(text: str, offset: int, length: int) -> str:
+    encoded = text.encode("utf-16-le")
+    return encoded[offset * 2 : (offset + length) * 2].decode("utf-16-le", errors="replace")

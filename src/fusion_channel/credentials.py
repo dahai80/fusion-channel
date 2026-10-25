@@ -91,7 +91,13 @@ class AESGCMCredentialProvider(CredentialProvider):
             return raw
         path.parent.mkdir(parents=True, exist_ok=True)
         raw = os.urandom(KEY_BYTES)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        # Two processes can race to first-use; O_EXCL loses, the winner's key
+        # is authoritative (loser must NOT overwrite — that would orphan every
+        # secret the winner already encrypted).
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            return self._load_key()
         with os.fdopen(fd, "wb") as handle:
             handle.write(raw)
         os.chmod(path, 0o600)
@@ -124,9 +130,13 @@ class AESGCMCredentialProvider(CredentialProvider):
         return self.secrets_dir / f"{name}.enc"
 
     def put(self, name: str, value: str) -> None:
+        import uuid
+
         self.secrets_dir.mkdir(parents=True, exist_ok=True)
         blob = self._encrypt(value.encode("utf-8"))
-        tmp = self._path(name).with_suffix(".enc.tmp")
+        # Unique tmp name per write: concurrent puts of the same secret must
+        # not truncate each other's temp file mid-write.
+        tmp = self.secrets_dir / f".{name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
         # Create with 0600 up front — no window where the ciphertext blob is
         # group/world-readable (matches the key-file pattern in _load_key).
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

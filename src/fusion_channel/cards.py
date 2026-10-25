@@ -105,21 +105,28 @@ class CardRenderer:
         return {"blocks": blocks}
 
     def _telegram_keyboard(self, card: Card) -> dict:
+        if not card.actions:
+            # An empty inline_keyboard [[...]] is a Telegram API 400 error —
+            # cards without actions degrade to plain text.
+            logger.info("telegram card without actions, plain text title=%s", card.title)
+            return {}
         keyboard = [
             [{"text": action.label, "callback_data": f"{action.action}:{card.code}"} for action in card.actions]
         ]
         return {"reply_markup": {"inline_keyboard": keyboard}}
 
     def _wecom_textcard(self, card: Card) -> dict:
-        # WeCom application message text_card: partial card support.
+        # WeCom application message text_card: partial card support. Without
+        # a click url there is no valid textcard — degrade to text fallback.
         if not card.url:
-            logger.warning("wecom textcard without click url, using placeholder title=%s", card.title)
+            logger.info("wecom textcard without click url, using text fallback title=%s", card.title)
+            return {}
         return {
             "msgtype": "textcard",
             "textcard": {
                 "title": card.title,
                 "description": card.body,
-                "url": card.url or "https://example.invalid/card",
+                "url": card.url,
                 "btntxt": card.actions[0].label if card.actions else "查看",
             },
         }

@@ -124,7 +124,10 @@ class TencentSmsAdapter(HttpAdapterMixin, ChannelAdapter):
         phone = message.conversation.id.split("->")[0] if "->" in message.conversation.id else message.conversation.id
         body = json.dumps(
             {
-                "PhoneNumberSet": [f"+86{phone.lstrip('+86')}"],
+                # E.164 passthrough; bare national numbers get the +86 prefix.
+                # Never lstrip() — it strips a character set, not a prefix
+                # ("+8613..." could lose its leading 8 or 6 digits).
+                "PhoneNumberSet": [phone if phone.startswith("+") else f"+86{phone}"],
                 "SmsSdkAppId": self.credentials.get("sdk_app_id", ""),
                 "SignName": self.credentials.get("sign_name", ""),
                 "TemplateId": self.credentials.get("template_id", ""),

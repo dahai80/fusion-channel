@@ -96,20 +96,70 @@ class WeComAppAdapter(HttpAdapterMixin, ChannelAdapter):
         self._token_cache = (token, time.monotonic() + max(60, expires_in - 120))
         return token
 
+    def _callback_data(self, request: ChannelRequest) -> tuple[str, str, str, str]:
+        # Real WeCom callbacks: msg_signature/timestamp/nonce ride in the URL
+        # query string; the body is XML (<xml><Encrypt>..</Encrypt></xml>) —
+        # some SDK bridges post JSON {"encrypt": ..} instead. Accept both.
+        from urllib.parse import parse_qs, urlparse
+
+        params = {k: v[-1] for k, v in parse_qs(urlparse(request.url).query).items()}
+        body = request.json_body
+        if not isinstance(body, dict):
+            body = {}
+        # JSON bridges post the signature params in the body; real WeCom
+        # callbacks put them in the query string — query wins, body is fallback.
+        msg_signature = params.get("msg_signature") or str(body.get("msg_signature", ""))
+        timestamp = params.get("timestamp") or str(body.get("timestamp", ""))
+        nonce = params.get("nonce") or str(body.get("nonce", ""))
+        encrypt = ""
+        if body.get("encrypt"):
+            encrypt = str(body["encrypt"])
+        else:
+            try:
+                root = ET.fromstring(request.body.decode("utf-8", errors="replace"))
+                encrypt = root.findtext("Encrypt", "") or ""
+            except ET.ParseError:
+                encrypt = ""
+        return encrypt, msg_signature, timestamp, nonce
+
     def verify_request(self, request: ChannelRequest) -> VerifyResult:
-        body = request.json_body or {}
-        encrypt_xml = body.get("encrypt", "")
-        msg_signature = body.get("msg_signature", "")
-        timestamp = body.get("timestamp", "")
-        nonce = body.get("nonce", "")
+        encrypt_xml, msg_signature, timestamp, nonce = self._callback_data(request)
         ok = verify_wecom_signature(self.credentials.get("token", ""), timestamp, nonce, encrypt_xml, msg_signature)
         if not ok:
             logger.warning("wecom signature rejected channel=%s", self.channel_id)
         return VerifyResult(ok=ok, reason="" if ok else "signature_mismatch")
 
+    def handle_verification_get(self, request: ChannelRequest) -> WebhookResponse:
+        # URL-verification GET: verify the echostr signature, decrypt, echo.
+        from urllib.parse import parse_qs, urlparse
+
+        from fusion_channel.verify import verify_wecom_signature, wecom_decrypt
+
+        params = {k: v[-1] for k, v in parse_qs(urlparse(request.url).query).items()}
+        echostr = params.get("echostr", "")
+        ok = verify_wecom_signature(
+            self.credentials.get("token", ""),
+            params.get("timestamp", ""),
+            params.get("nonce", ""),
+            echostr,
+            params.get("msg_signature", ""),
+        )
+        if not ok:
+            logger.warning("wecom GET echostr signature rejected channel=%s", self.channel_id)
+            return WebhookResponse(status_code=403, body="invalid signature", media_type="text/plain")
+        try:
+            plain = wecom_decrypt(
+                self.credentials.get("encoding_aes_key", ""),
+                echostr,
+                expected_receive_id=self.credentials.get("corp_id", ""),
+            )
+        except Exception as exc:
+            logger.warning("wecom GET echostr decrypt failed err=%s", exc)
+            return WebhookResponse(status_code=403, body="invalid signature", media_type="text/plain")
+        return WebhookResponse(status_code=200, body=plain.decode("utf-8", errors="replace"), media_type="text/plain")
+
     def _decrypt_xml(self, request: ChannelRequest) -> ET.Element | None:
-        body = request.json_body or {}
-        encrypt_xml = body.get("encrypt", "")
+        encrypt_xml, _, _, _ = self._callback_data(request)
         if not encrypt_xml:
             return None
         plain = wecom_decrypt(
@@ -132,7 +182,10 @@ class WeComAppAdapter(HttpAdapterMixin, ChannelAdapter):
         from_user = root.findtext("FromUserName", "")
         to_user = root.findtext("ToUserName", "")
         content = root.findtext("Content", "")
-        msg_id = root.findtext("MsgId", "") or root.findtext("CreateTime", "")
+        # MsgId only — CreateTime has second precision and collides on burst
+        # traffic; registry synthesizes an id for event callbacks (subscribe,
+        # enter_agent) that carry no MsgId.
+        msg_id = root.findtext("MsgId", "")
         chat_id = root.findtext("ChatId", "")
         # App chat messages carry group context; direct app messages do not.
         conversation_type = "group" if chat_id else "direct"

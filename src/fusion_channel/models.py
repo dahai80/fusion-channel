@@ -83,6 +83,14 @@ class Interaction(BaseModel):
     conversation: Conversation | None = None
 
 
+class Receipt(BaseModel):
+    channel_id: str
+    message_id: str
+    status: str  # delivered | read | failed
+    raw: dict[str, Any] = Field(default_factory=dict)
+    received_at: dt.datetime = Field(default_factory=lambda: dt.datetime.now(dt.UTC))
+
+
 class InboundEnvelope(BaseModel):
     channel_id: str
     message_id: str  # provider-side unique id, dedup key
@@ -92,6 +100,7 @@ class InboundEnvelope(BaseModel):
     media: list[MediaRef] = Field(default_factory=list)
     mentions: list[ExternalIdentity] = Field(default_factory=list)
     interaction: Interaction | None = None
+    receipt: Receipt | None = None  # delivery receipt: archived, never dispatched
     raw: dict[str, Any] = Field(default_factory=dict)  # full original payload, archive-first
     received_at: dt.datetime = Field(default_factory=lambda: dt.datetime.now(dt.UTC))
     tenant: str | None = None
@@ -155,14 +164,6 @@ class GroupInfo(BaseModel):
     group_id: str
     name: str = ""
     members: list[ExternalIdentity] = Field(default_factory=list)
-
-
-class Receipt(BaseModel):
-    channel_id: str
-    message_id: str
-    status: str  # delivered | read | failed
-    raw: dict[str, Any] = Field(default_factory=dict)
-    received_at: dt.datetime = Field(default_factory=lambda: dt.datetime.now(dt.UTC))
 
 
 def make_outbound_dedup_key(message: OutboundMessage, window_seconds: int = 3600) -> str:

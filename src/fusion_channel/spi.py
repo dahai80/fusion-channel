@@ -13,6 +13,7 @@ from fusion_channel.models import (
     SendResult,
     TestResult,
     VerifyResult,
+    WebhookResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -112,6 +113,11 @@ class ChannelAdapter(ABC):
 
     def webhook_response(self, request: ChannelRequest, envelope: InboundEnvelope | None) -> Any:
         return None
+
+    def handle_verification_get(self, request: ChannelRequest) -> WebhookResponse:
+        # GET handshake (WeCom echostr, WhatsApp hub.challenge). Adapters with
+        # a GET handshake override this; the default rejects politely.
+        return WebhookResponse(status_code=405, body="method not allowed", media_type="text/plain")
 
     async def group_ops(self) -> GroupOps:
         caps = self.capabilities()

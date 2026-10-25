@@ -103,7 +103,7 @@ AuditHook          CardRenderer（按 CAN_CARDS 降级）
 1. **验签是 SPI 级强制项**——不实现 `verify_request` 的适配器类无法注册（`ConfigError`）。
 2. **先落库再处理**——入站消息带原始载荷先持久化，重复投递计数，绝不丢弃。
 3. **拒收请求同样留档**（`RejectedEnvelope`），攻击面与丢消息可审计。
-4. **出站走 outbox**——发送意图先入队；flush 循环按 `[30, 120, 600]` 秒退避重试，最多 3 次，之后触发 `on_permanent_failure`（ai-family 告警模式）。
+4. **出站走 outbox**——发送意图先入队；flush 循环按 `[30, 120, 600]` 秒退避重试，最多 3 次，之后触发 `on_permanent_failure`（ai-family 告警模式）。记录发送前先 CAS 认领（`pending` → `sending` 租约），双 worker 绝不重复发送；崩溃 worker 的租约过期后自动回队重发；pending 超过 24 小时的记录按永久失败处理。
 5. **降级是渲染问题，不是业务问题**——消费应用永远说"发卡片"；`CAN_CARDS=none` 的通道自动渲染兜底文本（"回复 同意 AP-123456"），回复再解析回同一个 `Interaction`。
 6. **凭据不进库**——`CredentialProvider` 接口 + AES-256-GCM 文件默认实现（0600 密钥、原子写入）；describe 只回掩码。
 7. **失败即关闭**——攻击者输入导致验签/解析抛异常时拒收留档并回 4xx（绝不 500）；webhook 请求体超 1 MiB 返回 413；适配器错误字符串先脱敏再进日志或 `SendResult`。
@@ -137,17 +137,19 @@ AuditHook          CardRenderer（按 CAN_CARDS 降级）
 
 ```bash
 source /Users/dahai/fusion/.venv/bin/activate
-pytest tests/                          # 116 项测试：密码学向量、webhook E2E、outbox、矩阵、加固
+pytest tests/                          # 145 项测试：密码学向量、webhook E2E、outbox、矩阵、加固
 pytest tests/test_e2e_approval.py -v   # 跨通道审批验收
 ruff check . && ruff format --check .  # lint
 ```
 
 测试覆盖要点：
 
-- 每通道真实签名向量（含飞书/企微 AES-CBC 往返、Slack 重放窗口拒绝、钉钉毫秒时间戳处理）。
-- FastAPI TestClient E2E：签名 webhook → 验签 → 解析 → 去重 → 归档 → handler；坏签名 → 403 + 拒收留档；重复投递 → 200 且不重复派发。
-- 跨通道审批验收：同一个 `AP-123456` 决定分别经 SMS 文本、Slack Block Kit 按钮、钉钉加签指令、Telegram inline keyboard、WhatsApp 文本、企微加密回调、飞书群 @ 到达——一个 handler、一个状态机。
-- 出站 E2E（`httpx.MockTransport`）：断言 Twilio/飞书/Slack 真实请求体形态；每适配器 `test_connection()` 冒烟。
+- 每通道真实签名向量（含飞书/企微 AES-CBC 往返、Slack 重放窗口拒绝、钉钉毫秒时间戳、阿里云 RFC3986 percent-encode）。
+- FastAPI TestClient E2E：签名 webhook → 验签 → 解析 → 去重 → 归档 → handler；坏签名 → 403 + 拒收留档；重复投递 → 200 且不重复派发；内部异常 → 拒收留档 + 400，绝不 500。
+- GET 握手：企微 `echostr` URL 验证、WhatsApp `hub.challenge` 回显（校验 verify_token），走路由的 GET 端点。
+- 送达回执（Twilio `MessageStatus`、WhatsApp `statuses`）按 Receipt 归档，绝不当作消息派发；challenge 重试永远重新回显（不去重）。
+- 跨通道审批验收：同一个 `AP-123456` 决定分别经 SMS 文本、Slack Block Kit 按钮、钉钉加签指令、Telegram inline keyboard、WhatsApp 文本、企微加密回调、飞书群 @、飞书卡片按钮回调到达——一个 handler、一个状态机。
+- 出站 E2E（`httpx.MockTransport`）：断言 Twilio/飞书/Slack 真实请求体形态；每适配器 `test_connection()` 冒烟（钉钉为静态检查——机器人发送必进真实群）。
 - 真实服务商调用需要沙箱凭据，标记为 `integration`（默认排除）。
 
 ## 许可证

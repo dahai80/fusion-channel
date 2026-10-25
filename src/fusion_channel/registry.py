@@ -140,6 +140,27 @@ class ChannelRegistry:
                 "parse_failed",
             )
 
+        # Provider payloads without a usable id would collapse the dedup key
+        # to ("channel", "") and silently swallow every later message —
+        # synthesize a deterministic id from the raw payload instead.
+        if not envelope.message_id:
+            envelope.message_id = _synthetic_message_id(envelope)
+            logger.info("synthetic message_id channel=%s id=%s", channel_id, envelope.message_id)
+
+        # Challenge handshakes (feishu/slack url_verification) must echo the
+        # challenge on every retry — never dedup them.
+        if envelope.message_id == "url_verification":
+            return HandleInboundResult(
+                envelope, adapter.webhook_response(request, envelope) or WebhookResponse(), "challenge"
+            )
+
+        # Delivery receipts are archived, never dispatched as messages.
+        if envelope.receipt is not None:
+            await self.archive.on_receipt(envelope.receipt)
+            return HandleInboundResult(
+                envelope, adapter.webhook_response(request, envelope) or WebhookResponse(), "receipt"
+            )
+
         conversation = envelope.conversation
         if (
             conversation.type == "group"
@@ -224,16 +245,26 @@ class ChannelRegistry:
         return HandleInboundResult(envelope, response)
 
     async def _reject(self, channel_id: str, request: ChannelRequest, reason: str) -> None:
+        # Query strings carry verify tokens; strip them. json_body is capped
+        # like the raw body so an attacker cannot bypass the size limit.
+        import json as _json
+
+        capped_json = None
+        if request.json_body is not None:
+            try:
+                capped_json = _json.dumps(request.json_body, ensure_ascii=False, default=str)[:4000]
+            except (TypeError, ValueError):
+                capped_json = None
         rejected = RejectedEnvelope(
             channel_id=channel_id,
             reason=reason,
             raw={
                 "method": request.method,
-                "url": request.url,
+                "url": request.url.split("?")[0],
                 "headers": {k: v for k, v in request.headers.items() if k.lower() not in ("authorization", "cookie")},
                 "form": request.form,
                 "body": request.body.decode("utf-8", errors="replace")[:4000],
-                "json": request.json_body,
+                "json": capped_json,
             },
         )
         await self.archive.on_rejected(rejected)
@@ -314,8 +345,32 @@ class ChannelRegistry:
     async def init(self) -> None:
         await self.store.init()
 
+    def start_outbox(self, interval: float = 5.0):
+        # Owned outbox worker: close() cancels it so consumers don't leak tasks.
+        import asyncio
+
+        self._outbox_task = asyncio.create_task(self.outbox.run_loop(interval))
+        logger.info("outbox worker started interval=%s", interval)
+        return self._outbox_task
+
     async def close(self) -> None:
+        import asyncio
+        import contextlib
+
+        task = getattr(self, "_outbox_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         await self.store.close()
+
+
+def _synthetic_message_id(envelope: InboundEnvelope) -> str:
+    import hashlib
+    import json
+
+    basis = json.dumps(envelope.raw, ensure_ascii=False, sort_keys=True, default=str)[:4000]
+    return "auto:" + hashlib.sha256(basis.encode("utf-8", errors="replace")).hexdigest()[:24]
 
 
 def merged_rate_limits(root: RootConfig) -> dict[str, int]:

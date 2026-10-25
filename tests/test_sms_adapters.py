@@ -56,10 +56,15 @@ def test_aliyun_rpc_signature_v1():
     params = adapter._rpc_params("+8613800000002", {"content": "hello"})
     signed = adapter._signed(params)
     assert "Signature" in signed
-    # Independent recomputation of the documented scheme (HMAC-SHA1 over
-    # GET&%2F&<percent-encoded sorted query>, key = secret + "&").
-    sorted_query = urllib.parse.urlencode(sorted(params.items()))
-    string_to_sign = "GET&%2F&" + urllib.parse.quote(sorted_query, safe="")
+
+    def _percent_encode(value) -> str:
+        return urllib.parse.quote(str(value), safe="-_.~")
+
+    # Independent recomputation of the documented scheme: RFC3986 strict
+    # percent-encoding (space -> %20, NOT "+"), HMAC-SHA1, key = secret + "&".
+    assert _percent_encode("a b") == "a%20b"
+    query = "&".join(f"{_percent_encode(k)}={_percent_encode(v)}" for k, v in sorted(params.items()))
+    string_to_sign = "GET&%2F&" + _percent_encode(query)
     expected = base64.b64encode(hmac.new(b"aliyun-secret&", string_to_sign.encode(), hashlib.sha1).digest()).decode()
     assert signed["Signature"] == expected
 
