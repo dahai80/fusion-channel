@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import xml.etree.ElementTree as ET
 
 import httpx
@@ -8,7 +9,6 @@ import httpx
 from fusion_channel.adapters import HttpAdapterMixin, register
 from fusion_channel.capabilities import matrix_capabilities
 from fusion_channel.models import (
-    Card,
     ChannelRequest,
     Conversation,
     ExternalIdentity,
@@ -49,15 +49,6 @@ class WeComGroupOps(GroupOps):
                 return group
         return GroupInfo(group_id=group_id)
 
-    async def broadcast(self, conversation, text: str) -> SendResult:
-        message = OutboundMessage(
-            channel_id=self.adapter.channel_id,
-            conversation=conversation,
-            text=text,
-            meta={"rendered": {"text": text, "card_payload": None, "used_fallback": False}},
-        )
-        return await self.adapter.send(message)
-
 
 @register
 class WeComAppAdapter(HttpAdapterMixin, ChannelAdapter):
@@ -84,9 +75,9 @@ class WeComAppAdapter(HttpAdapterMixin, ChannelAdapter):
         ]
 
     async def access_token(self) -> str:
-        cached = self.config.get("_access_token")
-        if cached:
-            return cached
+        cached = getattr(self, "_token_cache", None)
+        if cached and cached[1] > time.monotonic():
+            return cached[0]
         async with self._client() as client:
             resp = await client.get(
                 f"{WECOM_BASE}/gettoken",
@@ -99,7 +90,10 @@ class WeComAppAdapter(HttpAdapterMixin, ChannelAdapter):
         if payload.get("errcode") != 0:
             raise RuntimeError(f"wecom token errcode={payload.get('errcode')} msg={payload.get('errmsg')}")
         token = payload.get("access_token", "")
-        self.config["_access_token"] = token
+        expires_in = int(payload.get("expires_in", 7200))
+        # Refresh 120s before server-side expiry so long-lived processes
+        # never send with a stale token.
+        self._token_cache = (token, time.monotonic() + max(60, expires_in - 120))
         return token
 
     def verify_request(self, request: ChannelRequest) -> VerifyResult:
@@ -118,7 +112,11 @@ class WeComAppAdapter(HttpAdapterMixin, ChannelAdapter):
         encrypt_xml = body.get("encrypt", "")
         if not encrypt_xml:
             return None
-        plain = wecom_decrypt(self.credentials.get("encoding_aes_key", ""), encrypt_xml)
+        plain = wecom_decrypt(
+            self.credentials.get("encoding_aes_key", ""),
+            encrypt_xml,
+            expected_receive_id=self.credentials.get("corp_id", ""),
+        )
         return ET.fromstring(plain.decode("utf-8"))
 
     def parse_inbound(self, request: ChannelRequest) -> InboundEnvelope:
@@ -195,11 +193,6 @@ class WeComAppAdapter(HttpAdapterMixin, ChannelAdapter):
 
     async def group_ops(self) -> GroupOps:
         return WeComGroupOps(self)
-
-    def render_card(self, card: Card):
-        from fusion_channel.cards import DEFAULT_RENDERER
-
-        return DEFAULT_RENDERER.render(self.capabilities(), self.adapter_id(), card)
 
 
 def _element_to_dict(element: ET.Element) -> dict:

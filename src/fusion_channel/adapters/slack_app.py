@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import json
 import logging
+import re
 
 import httpx
 
 from fusion_channel.adapters import HttpAdapterMixin, register
 from fusion_channel.capabilities import matrix_capabilities
 from fusion_channel.models import (
-    Card,
     ChannelRequest,
     Conversation,
     ExternalIdentity,
@@ -68,15 +69,6 @@ class SlackGroupOps(GroupOps):
             ]
         return GroupInfo(group_id=group_id, name=channel.get("name", ""), members=members)
 
-    async def broadcast(self, conversation, text: str) -> SendResult:
-        message = OutboundMessage(
-            channel_id=self.adapter.channel_id,
-            conversation=conversation,
-            text=text,
-            meta={"rendered": {"text": text, "card_payload": None, "used_fallback": False}},
-        )
-        return await self.adapter.send(message)
-
 
 @register
 class SlackAppAdapter(HttpAdapterMixin, ChannelAdapter):
@@ -121,20 +113,21 @@ class SlackAppAdapter(HttpAdapterMixin, ChannelAdapter):
                 raw=payload,
             )
         event = payload.get("event", {})
-        event_type = event.get("type", "")
-        user = event.get("user", "")
-        channel_id = event.get("channel", "")
+        # block_actions payloads carry type/user/channel at the top level;
+        # event_callback payloads nest them under "event".
+        event_type = event.get("type", "") or payload.get("type", "")
+        user = event.get("user") or payload.get("user", "")
+        raw_channel = event.get("channel") or payload.get("channel", "")
+        channel_id = raw_channel.get("id", "") if isinstance(raw_channel, dict) else raw_channel
         channel_type = event.get("channel_type", "channel")
         text = event.get("text", "")
         event_ts = event.get("ts", "") or payload.get("event_id", "")
         # Strip <@U123> mention markup into mention identities.
-        import re as _re
-
         mentions = [
             ExternalIdentity(channel_id=self.channel_id, external_id=match)
-            for match in _re.findall(r"<@([A-Z0-9]+)>", text)
+            for match in re.findall(r"<@([A-Z0-9]+)>", text)
         ]
-        clean_text = _re.sub(r"<@[A-Z0-9]+>", "", text).strip()
+        clean_text = re.sub(r"<@[A-Z0-9]+>", "", text).strip()
         interaction: Interaction | None = None
         if event_type == "block_actions":
             actions = payload.get("actions", [])
@@ -167,11 +160,9 @@ class SlackAppAdapter(HttpAdapterMixin, ChannelAdapter):
 
     def webhook_response(self, request: ChannelRequest, envelope) -> WebhookResponse:
         if envelope is not None and envelope.message_id == "url_verification":
-            import json as _json
-
             return WebhookResponse(
                 status_code=200,
-                body=_json.dumps({"challenge": envelope.raw.get("challenge", "")}),
+                body=json.dumps({"challenge": envelope.raw.get("challenge", "")}),
                 media_type="application/json",
             )
         return WebhookResponse(status_code=200, body="ok", media_type="text/plain")
@@ -183,7 +174,7 @@ class SlackAppAdapter(HttpAdapterMixin, ChannelAdapter):
         if message.reply_to:
             data["thread_ts"] = message.reply_to
         if card_payload and card_payload.get("blocks"):
-            data["blocks"] = _json_dumps(card_payload["blocks"])
+            data["blocks"] = json.dumps(card_payload["blocks"], ensure_ascii=False)
             if rendered.get("text"):
                 data["text"] = rendered["text"]
         else:
@@ -217,14 +208,3 @@ class SlackAppAdapter(HttpAdapterMixin, ChannelAdapter):
 
     async def group_ops(self) -> GroupOps:
         return SlackGroupOps(self)
-
-    def render_card(self, card: Card):
-        from fusion_channel.cards import DEFAULT_RENDERER
-
-        return DEFAULT_RENDERER.render(self.capabilities(), self.adapter_id(), card)
-
-
-def _json_dumps(obj) -> str:
-    import json
-
-    return json.dumps(obj, ensure_ascii=False)

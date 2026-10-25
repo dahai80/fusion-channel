@@ -4,10 +4,9 @@ import logging
 
 import httpx
 
-from fusion_channel.adapters import HttpAdapterMixin, register
+from fusion_channel.adapters import HttpAdapterMixin, redact_secrets, register
 from fusion_channel.capabilities import matrix_capabilities
 from fusion_channel.models import (
-    Card,
     ChannelRequest,
     Conversation,
     ExternalIdentity,
@@ -54,15 +53,6 @@ class TelegramGroupOps(GroupOps):
 
     async def info(self, group_id: str) -> GroupInfo:
         return GroupInfo(group_id=group_id)
-
-    async def broadcast(self, conversation, text: str) -> SendResult:
-        message = OutboundMessage(
-            channel_id=self.adapter.channel_id,
-            conversation=conversation,
-            text=text,
-            meta={"rendered": {"text": text, "card_payload": None, "used_fallback": False}},
-        )
-        return await self.adapter.send(message)
 
 
 @register
@@ -183,7 +173,7 @@ class TelegramBotAdapter(HttpAdapterMixin, ChannelAdapter):
                 )
             return SendResult(ok=False, error=f"telegram error={payload.get('description')}")
         except httpx.HTTPError as exc:
-            return SendResult(ok=False, error=f"telegram http error: {exc}")
+            return SendResult(ok=False, error=f"telegram http error: {redact_secrets(str(exc))}")
 
     async def test_connection(self) -> TestResult:
         token = self.credentials.get("bot_token", "")
@@ -197,12 +187,7 @@ class TelegramBotAdapter(HttpAdapterMixin, ChannelAdapter):
                 return TestResult(ok=True, detail=f"getMe ok username={payload.get('result', {}).get('username')}")
             return TestResult(ok=False, detail=f"getMe error={payload.get('description')}")
         except httpx.HTTPError as exc:
-            return TestResult(ok=False, detail=f"http error: {exc}")
+            return TestResult(ok=False, detail=f"http error: {redact_secrets(str(exc))}")
 
     async def group_ops(self) -> GroupOps:
         return TelegramGroupOps(self)
-
-    def render_card(self, card: Card):
-        from fusion_channel.cards import DEFAULT_RENDERER
-
-        return DEFAULT_RENDERER.render(self.capabilities(), self.adapter_id(), card)

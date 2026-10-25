@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 import httpx
 
@@ -32,8 +33,16 @@ class HttpAdapterMixin:
         return httpx.AsyncClient(**kwargs)
 
 
-def _headers(request_headers: dict[str, str], name: str) -> str:
-    return request_headers.get(name.lower(), "")
+_SECRET_QUERY_RE = re.compile(r"(access_token|sign)=[^&\\s]+")
+_BOT_TOKEN_RE = re.compile(r"bot[0-9]+:[A-Za-z0-9_-]+")
+
+
+def redact_secrets(text: str) -> str:
+    # httpx error strings embed request URLs; provider tokens/signs in those
+    # URLs are replayable credentials and must never reach logs or outbox
+    # last_error fields.
+    text = _SECRET_QUERY_RE.sub(r"\1=***", text)
+    return _BOT_TOKEN_RE.sub("bot***", text)
 
 
 from fusion_channel.adapters.aliyun_sms import AliyunSmsAdapter  # noqa: E402

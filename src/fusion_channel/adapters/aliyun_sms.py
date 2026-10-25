@@ -4,8 +4,10 @@ import base64
 import datetime as dt
 import hashlib
 import hmac
+import json
 import logging
 import urllib.parse
+import uuid
 
 import httpx
 
@@ -88,13 +90,13 @@ class AliyunSmsAdapter(HttpAdapterMixin, ChannelAdapter):
             "PhoneNumbers": phone,
             "SignName": self.credentials.get("sign_name", ""),
             "TemplateCode": self.credentials.get("template_code", ""),
-            "TemplateParam": _json_dumps(template_param or {"content": ""}),
+            "TemplateParam": json.dumps(template_param or {"content": ""}, ensure_ascii=False),
             "Format": "JSON",
             "AccessKeyId": self.credentials.get("access_key_id", ""),
             "SignatureMethod": "HMAC-SHA1",
             "Timestamp": dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "SignatureVersion": "1.0",
-            "SignatureNonce": _nonce(),
+            "SignatureNonce": uuid.uuid4().hex,
             "RegionId": "cn-hangzhou",
         }
 
@@ -130,15 +132,3 @@ class AliyunSmsAdapter(HttpAdapterMixin, ChannelAdapter):
         return TestResult(
             ok=True, detail="credentials present (aliyun has no cheap echo endpoint; first send validates)"
         )
-
-
-def _json_dumps(obj) -> str:
-    import json
-
-    return json.dumps(obj, ensure_ascii=False)
-
-
-def _nonce() -> str:
-    import uuid
-
-    return uuid.uuid4().hex

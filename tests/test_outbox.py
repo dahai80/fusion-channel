@@ -160,8 +160,7 @@ async def test_registry_send_card_degrades_on_sms(registry):
         card=card,
     )
     assert outbox_id is not None
-    record = (await registry.store.due_outbound("0000-01-01T00:00:00+00:00"))[0]
-    rendered = record.payload["message"]["meta"]["rendered"]
+    rendered = registry.store.outbox[outbox_id]["payload"]["message"]["meta"]["rendered"]
     assert rendered["used_fallback"] is True
     assert "AP-123456" in rendered["text"]
     assert rendered["card_payload"] is None

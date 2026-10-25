@@ -132,8 +132,12 @@ async def test_group_ops_unsupported_raises():
     adapter = ADAPTERS["twilio_sms"]("family_twilio", {})
     with pytest.raises(CapabilityNotSupported):
         await adapter.group_ops()
-    with pytest.raises(CapabilityNotSupported):
-        adapter.render_card(approval_card())
+    # Base render_card degrades instead of raising: CAN_CARDS=none channels
+    # get the fallback text render (PRD: degradation is rendering, not business).
+    rendered = adapter.render_card(approval_card())
+    assert rendered.used_fallback is True
+    assert rendered.card_payload is None
+    assert "AP-123456" in rendered.text
 
 
 async def test_sqlite_store_parity(tmp_path):

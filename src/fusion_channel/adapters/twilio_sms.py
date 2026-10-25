@@ -138,11 +138,6 @@ class TwilioSmsAdapter(HttpAdapterMixin, ChannelAdapter):
         except httpx.HTTPError as exc:
             return TestResult(ok=False, detail=f"http error: {exc}")
 
-    def parse_event(self, request: ChannelRequest) -> InboundEnvelope | None:
-        # Twilio delivery status callbacks (MessageStatus present, no Body)
-        # are receipts, not inbound messages — nothing to produce here.
-        return None
-
 
 def _normalize_phone(phone: str) -> str:
     cleaned = "".join(c for c in phone if c.isdigit() or c == "+")

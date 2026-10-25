@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_RATE_LIMITS: dict[str, int] = {}
 
 
 class ConfigError(Exception):
@@ -38,6 +35,9 @@ class ChannelConfig:
         self.inbound = InboundConfig(data.get("inbound"))
         self.groups: list[str] = data.get("groups", [])
         self.mentions_required: bool = bool(data.get("mentions_required", False))
+        # When true, interactions (commands + card buttons) only dispatch for
+        # senders bound in identity_bindings (PRD §7.1 two-factor primitive).
+        self.require_bound_identity: bool = bool(data.get("require_bound_identity", False))
         self.extra: dict[str, Any] = {
             k: v
             for k, v in data.items()
@@ -51,6 +51,7 @@ class ChannelConfig:
                 "inbound",
                 "groups",
                 "mentions_required",
+                "require_bound_identity",
             }
         }
 
@@ -64,6 +65,7 @@ class ChannelConfig:
             "inbound": self.inbound.as_dict(),
             "groups": self.groups,
             "mentions_required": self.mentions_required,
+            "require_bound_identity": self.require_bound_identity,
         }
 
 
@@ -83,14 +85,6 @@ class RootConfig:
             if channel.id == channel_id:
                 return channel
         return None
-
-
-def _resolve_env(value: str) -> str:
-    # Credential sources: "env:VAR_NAME" pulls from environment; raw string
-    # is treated as a CredentialProvider key.
-    if isinstance(value, str) and value.startswith("env:"):
-        return os.environ.get(value[4:], "")
-    return value
 
 
 def load_config(source: str | Path | dict[str, Any]) -> RootConfig:

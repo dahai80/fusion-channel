@@ -67,8 +67,14 @@ class GroupOps(ABC):
     @abstractmethod
     async def info(self, group_id: str): ...
 
-    @abstractmethod
-    async def broadcast(self, conversation, text: str) -> SendResult: ...
+    async def broadcast(self, conversation, text: str) -> SendResult:
+        message = OutboundMessage(
+            channel_id=self.adapter.channel_id,
+            conversation=conversation,
+            text=text,
+            meta={"rendered": {"text": text, "card_payload": None, "used_fallback": False}},
+        )
+        return await self.adapter.send(message)
 
 
 class ChannelAdapter(ABC):
@@ -107,11 +113,6 @@ class ChannelAdapter(ABC):
     def webhook_response(self, request: ChannelRequest, envelope: InboundEnvelope | None) -> Any:
         return None
 
-    def parse_event(self, request: ChannelRequest) -> InboundEnvelope | None:
-        # Secondary callback stream (card actions, receipts). Adapters that
-        # receive interactions on a separate endpoint override this.
-        return None
-
     async def group_ops(self) -> GroupOps:
         caps = self.capabilities()
         if not caps.CAN_GROUP:
@@ -119,10 +120,9 @@ class ChannelAdapter(ABC):
         raise NotImplementedError(f"adapter={self.adapter_id()} does not implement group_ops")
 
     def render_card(self, card: Card) -> Any:
-        caps = self.capabilities()
-        if caps.CAN_CARDS == "none":
-            raise CapabilityNotSupported(f"adapter={self.adapter_id()} has no card support")
-        raise NotImplementedError(f"adapter={self.adapter_id()} does not implement render_card")
+        from fusion_channel.cards import DEFAULT_RENDERER
+
+        return DEFAULT_RENDERER.render(self.capabilities(), self.adapter_id(), card)
 
     def http_client_kwargs(self) -> dict[str, Any]:
         return {"timeout": 15.0}

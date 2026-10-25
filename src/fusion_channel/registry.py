@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fusion_channel.cards import DEFAULT_RENDERER, CommandParser
-from fusion_channel.config import ChannelConfig, ConfigError, RootConfig, load_config
+from fusion_channel.config import ChannelConfig, ConfigError, RootConfig, load_config, validate_credentials
 from fusion_channel.credentials import CredentialProvider, MemoryCredentialProvider
 from fusion_channel.hooks import ArchiveHook, AuditHook
-from fusion_channel.identity import IdentityMapper
+from fusion_channel.identity import IdentityMapper, IdentityNotBound
 from fusion_channel.models import (
     ChannelRequest,
     InboundEnvelope,
@@ -45,6 +46,7 @@ class ChannelRegistry:
         self,
         store: ChannelStore | None = None,
         credentials: CredentialProvider | None = None,
+        rate_limits: dict[str, int] | None = None,
     ):
         self.store = store or MemoryStore()
         self.credentials = credentials or MemoryCredentialProvider()
@@ -53,7 +55,7 @@ class ChannelRegistry:
         self.identity = IdentityMapper()
         self.archive = ArchiveHook(self.store)
         self.audit = AuditHook()
-        self.outbox = OutboxSender(self.store, self.adapters)
+        self.outbox = OutboxSender(self.store, self.adapters, rate_limits=rate_limits)
         self.command_parser = CommandParser()
         self._message_handlers: list[MessageHandler] = []
         self._interaction_handlers: list[InteractionHandler] = []
@@ -69,7 +71,7 @@ class ChannelRegistry:
         from fusion_channel.adapters import ADAPTERS
 
         root: RootConfig = load_config(config)
-        registry = cls(store=store, credentials=credentials)
+        registry = cls(store=store, credentials=credentials, rate_limits=merged_rate_limits(root))
         classes = dict(adapter_classes or ADAPTERS)
         for channel_config in root.channels:
             adapter_cls = classes.get(channel_config.adapter)
@@ -77,15 +79,17 @@ class ChannelRegistry:
                 raise ConfigError(f"unknown adapter {channel_config.adapter} (channel {channel_config.id})")
             _assert_verify_implemented(adapter_cls)
             resolved = {
-                name: registry.credentials.get(_resolve_credential_ref(value) or f"{channel_config.id}:{name}", "")
+                name: _credential_value(registry, channel_config.id, name, value)
                 for name, value in channel_config.credentials.items()
             }
+            errors = validate_credentials(adapter_cls, channel_config, resolved)
+            if errors:
+                raise ConfigError(f"channel {channel_config.id} credential validation failed: " + "; ".join(errors))
             adapter = adapter_cls(channel_config.id, resolved, channel_config.extra)
             registry.channels[channel_config.id] = channel_config
             registry.adapters[channel_config.id] = adapter
             logger.info("channel registered id=%s adapter=%s", channel_config.id, channel_config.adapter)
         registry.identity.load(root.identity_bindings)
-        registry.outbox = OutboxSender(registry.store, registry.adapters, rate_limits=merged_rate_limits(root))
         return registry
 
     # ---- inbound ----
@@ -101,7 +105,18 @@ class ChannelRegistry:
             )
 
         if channel_config.inbound.verify == "required":
-            result = adapter.verify_request(request)
+            try:
+                result = adapter.verify_request(request)
+            except Exception as exc:
+                # Attacker input can make verify raise (bad encodings, broken
+                # payloads); a raised exception must still reject-archive.
+                logger.warning("verify raised channel=%s err=%s", channel_id, exc)
+                await self._reject(channel_id, request, f"verify_error:{type(exc).__name__}")
+                return HandleInboundResult(
+                    None,
+                    WebhookResponse(status_code=403, body="invalid signature", media_type="text/plain"),
+                    "verify_error",
+                )
             if not result.ok:
                 await self._reject(channel_id, request, f"invalid_signature:{result.reason or 'verify_failed'}")
                 return HandleInboundResult(
@@ -112,7 +127,18 @@ class ChannelRegistry:
         elif channel_config.inbound.verify == "disabled":
             logger.warning("channel %s has verify=disabled — INSECURE, test only", channel_id)
 
-        envelope = adapter.parse_inbound(request)
+        try:
+            envelope = adapter.parse_inbound(request)
+        except Exception as exc:
+            # Parse failures (undecryptable payloads, malformed XML) reject
+            # and archive instead of surfacing a 500 (PRD §4.2).
+            logger.warning("parse failed channel=%s err=%s", channel_id, exc)
+            await self._reject(channel_id, request, f"parse_failed:{type(exc).__name__}")
+            return HandleInboundResult(
+                None,
+                WebhookResponse(status_code=400, body="bad payload", media_type="text/plain"),
+                "parse_failed",
+            )
 
         conversation = envelope.conversation
         if (
@@ -131,14 +157,21 @@ class ChannelRegistry:
                 await self.archive.on_inbound(envelope)
                 return HandleInboundResult(None, WebhookResponse(), "no_mention")
 
-        if channel_config.inbound.archive != "off":
-            saved = await self.archive.on_inbound_dedup(envelope)
+        if channel_config.inbound.archive == "off":
+            if not await self.store.save_inbound(channel_id, envelope.message_id, {"kind": "dedup_only"}):
+                return HandleInboundResult(None, WebhookResponse(), "duplicate")
+        else:
+            archive_envelope = envelope
+            if channel_config.inbound.archive == "metadata-only":
+                # Keep ids/sender/timestamps, drop content and raw payload
+                # (PRD §4.3 PII retention tuning).
+                archive_envelope = envelope.model_copy(
+                    update={"raw": {}, "text": "", "media": [], "interaction": None, "mentions": []}
+                )
+            saved = await self.archive.on_inbound_dedup(archive_envelope)
             if not saved:
                 await self.store.bump_duplicate(channel_id, envelope.message_id)
                 logger.info("duplicate inbound channel=%s message_id=%s", channel_id, envelope.message_id[:24])
-                return HandleInboundResult(None, WebhookResponse(), "duplicate")
-        else:
-            if not await self.store.save_inbound(channel_id, envelope.message_id, {"kind": "dedup_only"}):
                 return HandleInboundResult(None, WebhookResponse(), "duplicate")
 
         if envelope.interaction is None:
@@ -150,6 +183,29 @@ class ChannelRegistry:
             )
             if command is not None:
                 envelope.interaction = command
+
+        if envelope.interaction is not None:
+            if channel_config.require_bound_identity:
+                try:
+                    identity_id = self.identity.assert_bound_identity(channel_id, envelope.sender.external_id)
+                except IdentityNotBound as exc:
+                    logger.warning("interaction rejected, identity not bound channel=%s err=%s", channel_id, exc)
+                    await self.audit.emit(
+                        actor=envelope.sender.external_id,
+                        action="channel.interaction_rejected",
+                        target=f"channel:{channel_id}",
+                        detail={"reason": "identity_not_bound", "action": envelope.interaction.action},
+                    )
+                    return HandleInboundResult(
+                        envelope,
+                        WebhookResponse(status_code=403, body="identity not bound", media_type="text/plain"),
+                        "identity_not_bound",
+                    )
+                envelope.interaction.payload["identity_id"] = identity_id
+            elif envelope.interaction.actor is not None:
+                resolved = self.identity.identify(channel_id, envelope.interaction.actor.external_id)
+                if resolved:
+                    envelope.interaction.payload["identity_id"] = resolved
 
         if envelope.interaction is not None and await self._dedup_interaction(channel_id, envelope.interaction):
             for handler in self._interaction_handlers:
@@ -270,10 +326,22 @@ def merged_rate_limits(root: RootConfig) -> dict[str, int]:
     return limits
 
 
-def _resolve_credential_ref(value: Any) -> str:
-    if isinstance(value, str):
-        return value
-    return ""
+def _credential_value(registry: ChannelRegistry, channel_id: str, name: str, ref: Any) -> str:
+    # Credential sources, in priority order: "env:VAR" pulls from the
+    # environment; a non-empty string is first tried as a CredentialProvider
+    # key, then as the channel-scoped default key (channel:name); anything
+    # that resolves nowhere is used as the literal value (simple configs).
+    if isinstance(ref, str) and ref.startswith("env:"):
+        return os.environ.get(ref[4:], "")
+    if isinstance(ref, str) and ref:
+        from_provider = registry.credentials.get(ref, "")
+        if from_provider:
+            return from_provider
+    default_key = f"{channel_id}:{name}"
+    from_default = registry.credentials.get(default_key, "")
+    if from_default:
+        return from_default
+    return ref if isinstance(ref, str) else ""
 
 
 def _assert_verify_implemented(adapter_cls: type[ChannelAdapter]) -> None:

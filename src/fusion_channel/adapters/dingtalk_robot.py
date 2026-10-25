@@ -4,10 +4,9 @@ import logging
 
 import httpx
 
-from fusion_channel.adapters import HttpAdapterMixin, register
+from fusion_channel.adapters import HttpAdapterMixin, redact_secrets, register
 from fusion_channel.capabilities import matrix_capabilities
 from fusion_channel.models import (
-    Card,
     ChannelRequest,
     Conversation,
     ExternalIdentity,
@@ -38,15 +37,6 @@ class DingTalkGroupOps(GroupOps):
 
     async def info(self, group_id: str) -> GroupInfo:
         return GroupInfo(group_id=group_id, name="dingtalk-group")
-
-    async def broadcast(self, conversation, text: str) -> SendResult:
-        message = OutboundMessage(
-            channel_id=self.adapter.channel_id,
-            conversation=conversation,
-            text=text,
-            meta={"rendered": {"text": text, "card_payload": None, "used_fallback": False}},
-        )
-        return await self.adapter.send(message)
 
 
 @register
@@ -127,7 +117,7 @@ class DingTalkRobotAdapter(HttpAdapterMixin, ChannelAdapter):
                 return SendResult(ok=True, raw=payload)
             return SendResult(ok=False, error=f"dingtalk errcode={payload.get('errcode')} msg={payload.get('errmsg')}")
         except httpx.HTTPError as exc:
-            return SendResult(ok=False, error=f"dingtalk http error: {exc}")
+            return SendResult(ok=False, error=f"dingtalk http error: {redact_secrets(str(exc))}")
 
     async def test_connection(self) -> TestResult:
         # Signed self-check: compute a fresh sign and post an empty probe.
@@ -139,12 +129,7 @@ class DingTalkRobotAdapter(HttpAdapterMixin, ChannelAdapter):
                 return TestResult(ok=True, detail="robot reachable and sign valid")
             return TestResult(ok=False, detail=f"errcode={payload.get('errcode')} msg={payload.get('errmsg')}")
         except httpx.HTTPError as exc:
-            return TestResult(ok=False, detail=f"http error: {exc}")
+            return TestResult(ok=False, detail=f"http error: {redact_secrets(str(exc))}")
 
     async def group_ops(self) -> GroupOps:
         return DingTalkGroupOps(self)
-
-    def render_card(self, card: Card):
-        from fusion_channel.cards import DEFAULT_RENDERER
-
-        return DEFAULT_RENDERER.render(self.capabilities(), self.adapter_id(), card)

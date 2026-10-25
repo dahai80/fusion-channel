@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import datetime as dt
 import hashlib
 import hmac
 import logging
@@ -12,6 +11,14 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 logger = logging.getLogger(__name__)
 
 SLACK_MAX_AGE_SECONDS = 300
+DINGTALK_MAX_AGE_SECONDS = 300
+WECOM_MAX_AGE_SECONDS = 300
+
+
+def _ct_eq(left: str, right: str) -> bool:
+    # hmac.compare_digest raises TypeError on non-ASCII str; compare bytes so
+    # an attacker-controlled header can never trigger an unhandled exception.
+    return hmac.compare_digest(left.encode("utf-8", errors="replace"), right.encode("utf-8", errors="replace"))
 
 
 def verify_twilio_signature(url: str, params: dict[str, str], signature: str, auth_token: str) -> bool:
@@ -22,7 +29,7 @@ def verify_twilio_signature(url: str, params: dict[str, str], signature: str, au
     payload = url + "".join(f"{k}{v}" for k, v in sorted_items)
     digest = hmac.new(auth_token.encode(), payload.encode(), hashlib.sha1).digest()
     expected = base64.b64encode(digest).decode()
-    return hmac.compare_digest(expected, signature)
+    return _ct_eq(expected, signature)
 
 
 def verify_slack_signature(signing_secret: str, timestamp: str, body: str, signature: str) -> bool:
@@ -37,7 +44,7 @@ def verify_slack_signature(signing_secret: str, timestamp: str, body: str, signa
         return False
     base = f"v0:{timestamp}:{body}"
     expected = "v0=" + hmac.new(signing_secret.encode(), base.encode(), hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, signature)
+    return _ct_eq(expected, signature)
 
 
 def compute_dingtalk_sign(secret: str, timestamp: int | str) -> str:
@@ -46,7 +53,12 @@ def compute_dingtalk_sign(secret: str, timestamp: int | str) -> str:
     return base64.b64encode(digest).decode()
 
 
-def verify_dingtalk_signature(secret: str, timestamp: str, sign: str, max_age_seconds: int = 3600) -> bool:
+def verify_dingtalk_signature(
+    secret: str, timestamp: str, sign: str, max_age_seconds: int = DINGTALK_MAX_AGE_SECONDS
+) -> bool:
+    # Protocol limitation: the robot sign covers only (timestamp, secret),
+    # never the body — a captured sign is replayable with any body inside
+    # the freshness window. Keep the window tight (300s).
     if not secret or not sign or not timestamp:
         return False
     try:
@@ -60,20 +72,20 @@ def verify_dingtalk_signature(secret: str, timestamp: str, sign: str, max_age_se
         logger.warning("dingtalk signature stale timestamp=%s", timestamp)
         return False
     expected = compute_dingtalk_sign(secret, timestamp)
-    return hmac.compare_digest(expected, sign)
+    return _ct_eq(expected, sign)
 
 
 def verify_whatsapp_signature(app_secret: str, raw_body: bytes, x_hub_signature: str) -> bool:
     if not app_secret or not x_hub_signature:
         return False
     expected = "sha256=" + hmac.new(app_secret.encode(), raw_body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, x_hub_signature)
+    return _ct_eq(expected, x_hub_signature)
 
 
 def verify_telegram_secret_token(expected_token: str, received: str) -> bool:
     if not expected_token or not received:
         return False
-    return hmac.compare_digest(expected_token, received)
+    return _ct_eq(expected_token, received)
 
 
 def _pkcs7_unpad(data: bytes) -> bytes:
@@ -118,14 +130,28 @@ def wecom_signature(token: str, timestamp: str, nonce: str, encrypt_xml: str) ->
     return hashlib.sha1("".join(items).encode()).hexdigest()
 
 
-def verify_wecom_signature(token: str, timestamp: str, nonce: str, encrypt_xml: str, msg_signature: str) -> bool:
+def verify_wecom_signature(
+    token: str,
+    timestamp: str,
+    nonce: str,
+    encrypt_xml: str,
+    msg_signature: str,
+    max_age_seconds: int = WECOM_MAX_AGE_SECONDS,
+) -> bool:
     if not token or not msg_signature:
         return False
+    try:
+        ts = int(timestamp)
+    except (TypeError, ValueError):
+        return False
+    if abs(time.time() - ts) > max_age_seconds:
+        logger.warning("wecom signature stale timestamp=%s", timestamp)
+        return False
     expected = wecom_signature(token, timestamp, nonce, encrypt_xml)
-    return hmac.compare_digest(expected, msg_signature)
+    return _ct_eq(expected, msg_signature)
 
 
-def wecom_decrypt(encoding_aes_key: str, encrypted_b64: str) -> bytes:
+def wecom_decrypt(encoding_aes_key: str, encrypted_b64: str, expected_receive_id: str = "") -> bytes:
     # WeCom callback: AES-256-CBC, key = base64decode(encoding_aes_key + "="), iv = key[:16].
     key = base64.b64decode(encoding_aes_key + "=")
     if len(key) != 32:
@@ -135,7 +161,14 @@ def wecom_decrypt(encoding_aes_key: str, encrypted_b64: str) -> bytes:
     decryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor()
     plain = _pkcs7_unpad(decryptor.update(blob) + decryptor.finalize())
     # Layout: 16 random bytes + 4 bytes msg_len (network order) + msg + receiveid
+    if len(plain) < 20:
+        raise ValueError("wecom plaintext too short")
     msg_len = int.from_bytes(plain[16:20], "big")
+    if msg_len < 0 or len(plain) < 20 + msg_len:
+        raise ValueError("wecom msg_len exceeds plaintext")
+    receive_id = plain[20 + msg_len :].decode("utf-8", errors="replace")
+    if expected_receive_id and receive_id != expected_receive_id:
+        raise ValueError("wecom receiveid mismatch")
     return plain[20 : 20 + msg_len]
 
 
@@ -160,7 +193,7 @@ def verify_hmac_sha256_hex(secret: str, raw_body: bytes, signature: str) -> bool
         return False
     expected = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
     received = signature[7:] if signature.startswith("sha256=") else signature
-    return hmac.compare_digest(expected, received.lower())
+    return _ct_eq(expected, received.lower())
 
 
 def aliyun_sign(phones: str, content: str, secret: str, timestamp: int | str | None = None) -> str:
@@ -176,7 +209,3 @@ def tencent_sig(secret: str, timestamp: int | str | None = None) -> str:
     if timestamp is None:
         timestamp = int(time.time())
     return hmac.new(secret.encode(), str(timestamp).encode(), hashlib.sha256).hexdigest()
-
-
-def fresh_utcnow() -> dt.datetime:
-    return dt.datetime.now(dt.UTC)
