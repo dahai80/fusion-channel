@@ -2,7 +2,7 @@
 
 Unified messaging channel access layer for the Fusion ecosystem ("一核九端"). One library gives any Fusion application the ability to **receive, send, join groups, be @-mentioned, and push approval buttons** across SMS and IM providers — with verification, dedup, outbox retry, rate limiting, archiving, and identity mapping built in.
 
-> Status: v0.1.0 — M1–M3 scope landed (core abstractions + 9 first-batch adapters). The M4 bridge service is intentionally **not** built yet (library-first per the PRD); M5 ecosystem adoption happens inside consumer projects.
+> Status: v0.1.1 — M1–M3 scope landed (core abstractions + 10 first-batch adapters, including pull-mode email). The M4 bridge service is intentionally **not** built yet (library-first per the PRD); M5 ecosystem adoption happens inside consumer projects.
 
 ## Why
 
@@ -30,6 +30,7 @@ pip install -e ".[test]"        # add ,fastapi for the webhook router
 | `slack_app` | Slack Events API | `X-Slack-Signature` HMAC-SHA256 | full (Block Kit) | ✅ |
 | `whatsapp_cloud` | WhatsApp Cloud API | `X-Hub-Signature-256` | fallback text | – |
 | `telegram_bot` | Telegram Bot API | secret-token header | full (inline keyboard) | ✅ |
+| `email_imap` | Email (IMAP/SMTP) | transport auth (TLS + login) | fallback text | – |
 
 **Compliance red line:** no personal-WeChat reverse-engineered protocols. Official APIs only.
 
@@ -87,7 +88,7 @@ Full runnable example: `examples/approve_bot.py` with `examples/channels.yaml`.
 ## Architecture
 
 ```
-ChannelRegistry ── ChannelAdapter(SPI) ── 9 provider adapters
+ChannelRegistry ── ChannelAdapter(SPI) ── 10 provider adapters
       │                  │
 IdentityMapper    SignatureVerifier (per-channel policy)
       │                  │
@@ -122,6 +123,15 @@ Config details:
 - `mentions_required: true` gates group messages on @bot.
 - `group_ops()` on CAN_GROUP adapters: `list()` / `info()` / `broadcast()`; raises `CapabilityNotSupported` elsewhere so consumers can fall back to per-direct sends.
 
+## Pull-mode channels (email)
+
+Webhook channels get requests pushed; `email_imap` pulls instead. Adapters that override `ChannelAdapter.poll()` fetch their own messages (IMAP `UNSEEN`, batch-limited) and return them as raw requests — the registry runs each through the exact same `handle_inbound` pipeline (dedup, archive, commands, identity gate). There is no webhook signature to verify; TLS + account login are the trust boundary, and email `verify_request` always passes (logged). MIME handling stays thin: `text/plain` extraction plus attachment `MediaRef`s, `In-Reply-To` mapped to `conversation.thread_id`. Outbound goes through the same outbox (SMTP + STARTTLS); set the subject via `meta={"subject": ...}` or it defaults to the first line of the text.
+
+```python
+await registry.poll()  # one-shot: fetch + dispatch
+registry.start_polling(interval=60)  # background worker; close() cancels it
+```
+
 ## Capability matrix
 
 Every adapter declares `ChannelCapabilities` (CAN_RECEIVE / CAN_SEND / CAN_GROUP / CAN_BOT / CAN_MENTION / CAN_CARDS / CAN_MEDIA / CAN_RECEIPT / CAN_THREADS) — see `src/fusion_channel/capabilities.py`. Consumers branch on capabilities, never on adapter identity. Config `capabilities_override` tweaks per channel instance.
@@ -137,7 +147,7 @@ Every adapter declares `ChannelCapabilities` (CAN_RECEIVE / CAN_SEND / CAN_GROUP
 
 ```bash
 source /Users/dahai/fusion/.venv/bin/activate
-pytest tests/                          # 145 tests: crypto vectors, webhook E2E, outbox, matrix, hardening
+pytest tests/                          # 159 tests: crypto vectors, webhook E2E, outbox, matrix, hardening, email
 pytest tests/test_e2e_approval.py -v   # cross-channel approval acceptance
 ruff check . && ruff format --check .  # lint
 ```
@@ -150,6 +160,7 @@ Test coverage highlights:
 - Delivery receipts (Twilio `MessageStatus`, WhatsApp `statuses`) are archived as receipts, never dispatched as messages; challenge retries always re-echo (never deduped).
 - Cross-channel approval acceptance: the same `AP-123456` decision arrives via SMS text, Slack Block Kit button, DingTalk signed command, Telegram inline keyboard, WhatsApp text, WeCom encrypted callback, Feishu group mention, and Feishu card button callback — one handler, one state machine.
 - Outbound E2E via `httpx.MockTransport`: Twilio/Feishu/Slack provider payload shapes asserted; `test_connection()` smoke-tested per adapter (DingTalk's is static — a robot send always lands in a real group).
+- Email (`email_imap`): MIME parse (text extraction, attachments, In-Reply-To threading), SMTP send with subject/In-Reply-To headers, fake-transport E2E through `registry.poll()` including dedup on re-poll, fetch-error isolation, card-fallback outbox send, polling worker lifecycle.
 - Live provider calls require sandbox credentials and are marked `integration` (excluded by default).
 
 ## License

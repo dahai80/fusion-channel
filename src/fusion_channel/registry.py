@@ -281,6 +281,23 @@ class ChannelRegistry:
             channel_id, key, {"kind": "interaction", "interaction": interaction.model_dump(mode="json")}
         )
 
+    async def poll(self) -> list[HandleInboundResult]:
+        # Pull-mode ingestion: adapters that override ChannelAdapter.poll
+        # (IMAP, ...) fetch their own requests; each runs through the same
+        # handle_inbound pipeline as webhooks.
+        results: list[HandleInboundResult] = []
+        for channel_id, adapter in self.adapters.items():
+            if type(adapter).poll is ChannelAdapter.poll:
+                continue
+            try:
+                requests = await adapter.poll()
+            except Exception as exc:
+                logger.error("poll failed channel=%s err=%s", channel_id, exc)
+                continue
+            for request in requests:
+                results.append(await self.handle_inbound(channel_id, request))
+        return results
+
     # ---- outbound ----
 
     async def send(self, channel_id: str, conversation, spec: dict | None = None, **kwargs) -> int | None:
@@ -353,15 +370,30 @@ class ChannelRegistry:
         logger.info("outbox worker started interval=%s", interval)
         return self._outbox_task
 
+    def start_polling(self, interval: float = 60.0):
+        # Owned pull-mode worker for poll()-capable adapters (IMAP, ...);
+        # close() cancels it so consumers don't leak tasks.
+        import asyncio
+
+        async def _loop():
+            while True:
+                await self.poll()
+                await asyncio.sleep(interval)
+
+        self._poll_task = asyncio.create_task(_loop())
+        logger.info("polling worker started interval=%s", interval)
+        return self._poll_task
+
     async def close(self) -> None:
         import asyncio
         import contextlib
 
-        task = getattr(self, "_outbox_task", None)
-        if task is not None and not task.done():
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        for attr in ("_outbox_task", "_poll_task"):
+            task = getattr(self, attr, None)
+            if task is not None and not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         await self.store.close()
 
 

@@ -111,6 +111,13 @@ class ChannelAdapter(ABC):
     @abstractmethod
     async def test_connection(self) -> TestResult: ...
 
+    async def poll(self) -> list[ChannelRequest]:
+        # Pull-mode ingestion: adapters that fetch their own messages (IMAP,
+        # ...) override this and return raw requests; webhook-push adapters
+        # keep the no-op default. The registry feeds each request through
+        # the same handle_inbound pipeline as webhooks.
+        return []
+
     def webhook_response(self, request: ChannelRequest, envelope: InboundEnvelope | None) -> Any:
         return None
 
