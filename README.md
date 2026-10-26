@@ -161,7 +161,7 @@ Test coverage highlights:
 - Cross-channel approval acceptance: the same `AP-123456` decision arrives via SMS text, Slack Block Kit button, DingTalk signed command, Telegram inline keyboard, WhatsApp text, WeCom encrypted callback, Feishu group mention, and Feishu card button callback — one handler, one state machine.
 - Outbound E2E via `httpx.MockTransport`: Twilio/Feishu/Slack provider payload shapes asserted; `test_connection()` smoke-tested per adapter (DingTalk's is static — a robot send always lands in a real group).
 - Email (`email_imap`): MIME parse (text extraction, attachments, In-Reply-To threading), SMTP send with subject/In-Reply-To headers, fake-transport E2E through `registry.poll()` including dedup on re-poll, fetch-error isolation, card-fallback outbox send, polling worker lifecycle.
-- Live provider calls require sandbox credentials and are marked `integration` (excluded by default).
+- Live provider calls require sandbox credentials and are marked `integration` (excluded by default): Feishu tenant-token handshake; QQ Mail real IMAP/SMTP E2E (login + poll + dedup on the live INBOX, SMTP send-to-self with loopback receive, env-based credentials `FUSION_CHANNEL_QQ_EMAIL` / `FUSION_CHANNEL_QQ_AUTH_CODE`).
 
 ## License
 

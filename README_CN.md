@@ -161,7 +161,7 @@ ruff check . && ruff format --check .  # lint
 - 跨通道审批验收：同一个 `AP-123456` 决定分别经 SMS 文本、Slack Block Kit 按钮、钉钉加签指令、Telegram inline keyboard、WhatsApp 文本、企微加密回调、飞书群 @、飞书卡片按钮回调到达——一个 handler、一个状态机。
 - 出站 E2E（`httpx.MockTransport`）：断言 Twilio/飞书/Slack 真实请求体形态；每适配器 `test_connection()` 冒烟（钉钉为静态检查——机器人发送必进真实群）。
 - 邮件（`email_imap`）：MIME 解析（正文提取、附件、In-Reply-To 线程）、SMTP 发送（Subject/In-Reply-To 头）、假传输 E2E 走 `registry.poll()`（含二次拉取去重）、拉取异常隔离、卡片兜底 outbox 发送、轮询 worker 生命周期。
-- 真实服务商调用需要沙箱凭据，标记为 `integration`（默认排除）。
+- 真实服务商调用需要沙箱凭据，标记为 `integration`（默认排除）：飞书 tenant-token 握手；QQ 邮箱真实 IMAP/SMTP E2E（登录 + 拉取 + 二次拉取去重、SMTP 发给自己并回环收回，凭据走环境变量 `FUSION_CHANNEL_QQ_EMAIL` / `FUSION_CHANNEL_QQ_AUTH_CODE`）。
 
 ## 许可证
 
