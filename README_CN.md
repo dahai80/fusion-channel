@@ -2,7 +2,7 @@
 
 fusion 生态的统一 IM/短信通道接入库。任何 fusion 应用借助它即可获得**收消息、发消息、进群、被 @、弹审批按钮**的能力——验签、去重、outbox 重试、频控、归档、身份映射全部内置。
 
-> 状态：v0.1.0 —— M1–M3 范围已落地（核心抽象 + 第一批 9 个适配器）。M4 桥服务按 PRD 决策**暂不建设**（库优先）；M5 生态推广由各消费应用在自己的仓库内完成。
+> 状态：v0.1.1 —— M1–M3 范围已落地（核心抽象 + 第一批 10 个适配器，含拉取式邮件）。M4 桥服务按 PRD 决策**暂不建设**（库优先）；M5 生态推广由各消费应用在自己的仓库内完成。
 
 ## 为什么需要它
 
@@ -30,6 +30,7 @@ pip install -e ".[test]"        # webhook 路由再加 ,fastapi
 | `slack_app` | Slack Events API | `X-Slack-Signature` HMAC-SHA256 | 完整（Block Kit） | ✅ |
 | `whatsapp_cloud` | WhatsApp Cloud API | `X-Hub-Signature-256` | 文本兜底 | – |
 | `telegram_bot` | Telegram Bot API | secret-token 头 | 完整（inline keyboard） | ✅ |
+| `email_imap` | 邮件（IMAP/SMTP） | 传输层认证（TLS + 登录） | 文本兜底 | – |
 
 **合规红线**：个人微信逆向/外挂协议一概不做，只走官方 API。
 
@@ -87,7 +88,7 @@ user = registry.identify("family_twilio", "+15550000001")
 ## 架构
 
 ```
-ChannelRegistry ── ChannelAdapter(SPI) ── 9 个服务商适配器
+ChannelRegistry ── ChannelAdapter(SPI) ── 10 个服务商适配器
       │                  │
 IdentityMapper    SignatureVerifier（每通道策略）
       │                  │
@@ -122,6 +123,15 @@ AuditHook          CardRenderer（按 CAN_CARDS 降级）
 - `mentions_required: true` 时群内消息必须 @机器人 才触发。
 - CAN_GROUP 适配器提供 `group_ops()`：`list()` / `info()` / `broadcast()`；不支持的通道抛 `CapabilityNotSupported`，消费应用按能力降级为逐个私聊发送。
 
+## 拉取式通道（邮件）
+
+Webhook 通道是服务端推；`email_imap` 是拉。重写 `ChannelAdapter.poll()` 的适配器自己取信（IMAP `UNSEEN`，批量上限可配），返回原始请求——registry 把每个请求喂进与 webhook 完全相同的 `handle_inbound` 流水线（去重、归档、指令、身份门禁）。邮件没有 webhook 验签：TLS + 账号登录即信任边界，`verify_request` 恒通过（有日志）。MIME 处理保持薄：`text/plain` 提取 + 附件转 `MediaRef`，`In-Reply-To` 映射为 `conversation.thread_id`。出站同样走 outbox（SMTP + STARTTLS）；主题用 `meta={"subject": ...}` 指定，缺省取正文第一行。
+
+```python
+await registry.poll()  # 单次：拉取 + 派发
+registry.start_polling(interval=60)  # 后台 worker；close() 会取消
+```
+
 ## 能力矩阵
 
 每个适配器声明 `ChannelCapabilities`（CAN_RECEIVE / CAN_SEND / CAN_GROUP / CAN_BOT / CAN_MENTION / CAN_CARDS / CAN_MEDIA / CAN_RECEIPT / CAN_THREADS），见 `src/fusion_channel/capabilities.py`。消费应用按能力分支，绝不按适配器身份硬编码。配置 `capabilities_override` 可按通道实例覆盖。
@@ -137,7 +147,7 @@ AuditHook          CardRenderer（按 CAN_CARDS 降级）
 
 ```bash
 source /Users/dahai/fusion/.venv/bin/activate
-pytest tests/                          # 145 项测试：密码学向量、webhook E2E、outbox、矩阵、加固
+pytest tests/                          # 159 项测试：密码学向量、webhook E2E、outbox、矩阵、加固、邮件
 pytest tests/test_e2e_approval.py -v   # 跨通道审批验收
 ruff check . && ruff format --check .  # lint
 ```
@@ -150,6 +160,7 @@ ruff check . && ruff format --check .  # lint
 - 送达回执（Twilio `MessageStatus`、WhatsApp `statuses`）按 Receipt 归档，绝不当作消息派发；challenge 重试永远重新回显（不去重）。
 - 跨通道审批验收：同一个 `AP-123456` 决定分别经 SMS 文本、Slack Block Kit 按钮、钉钉加签指令、Telegram inline keyboard、WhatsApp 文本、企微加密回调、飞书群 @、飞书卡片按钮回调到达——一个 handler、一个状态机。
 - 出站 E2E（`httpx.MockTransport`）：断言 Twilio/飞书/Slack 真实请求体形态；每适配器 `test_connection()` 冒烟（钉钉为静态检查——机器人发送必进真实群）。
+- 邮件（`email_imap`）：MIME 解析（正文提取、附件、In-Reply-To 线程）、SMTP 发送（Subject/In-Reply-To 头）、假传输 E2E 走 `registry.poll()`（含二次拉取去重）、拉取异常隔离、卡片兜底 outbox 发送、轮询 worker 生命周期。
 - 真实服务商调用需要沙箱凭据，标记为 `integration`（默认排除）。
 
 ## 许可证

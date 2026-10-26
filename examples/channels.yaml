@@ -28,6 +28,16 @@ channels:
       access_token: home_dingtalk:access_token
       secret: home_dingtalk:secret   # HMAC-SHA256 signing mode required
 
+  - id: ops_email
+    adapter: email_imap
+    credentials:
+      host: mail.corp.com
+      username: ops_bot@corp.com
+      password: ops_email:password
+      from_address: ops_bot@corp.com  # optional, defaults to username
+    folder: INBOX                      # IMAP folder to poll
+    poll_batch_limit: 20               # max messages per poll cycle
+
 identity_bindings:
   - identity: "identity:u_123"        # fusion-identity account
     bindings:
