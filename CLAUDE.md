@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`fusion-channel` is the Fusion ecosystem's unified messaging channel access layer: webhook verification, outbox retry, dedup, archiving, interactive cards, group ops, and identity mapping across SMS/IM/email providers (Twilio, Aliyun/Tencent SMS, WeCom, Feishu, DingTalk, Slack, WhatsApp Cloud, Telegram, IMAP/SMTP email). In-tree Python library, `pip install -e fusion-channel`, same distribution mode as fusion-core. Library-first by design — no resident service, no port. The M4 bridge service is intentionally not built (PRD §9). Authoritative spec: `/Users/dahai/fusion/architecture/fusion-channel-prd-1025.md`.
+`fusion-channel` is the Fusion ecosystem's unified messaging channel access layer: webhook verification, outbox retry, dedup, archiving, interactive cards, group ops, and identity mapping across SMS/IM/email providers (Twilio, Aliyun/Tencent SMS, WeCom, Feishu, DingTalk, Slack, WhatsApp Cloud, Telegram, IMAP/SMTP email, Microsoft 365 Graph mail). In-tree Python library, `pip install -e fusion-channel`, same distribution mode as fusion-core. Library-first by design — no resident service, no port. The M4 bridge service is intentionally not built (PRD §9). Authoritative spec: `/Users/dahai/fusion/architecture/fusion-channel-prd-1025.md`.
 
 ## Commands
 
@@ -27,7 +27,7 @@ Tests default to `-m 'not integration'`; live-provider tests (needing sandbox cr
 - `spi.py` — `ChannelAdapter` ABC. **`verify_request` is abstract: an adapter without its own implementation cannot be registered** (registry re-checks at registration and raises `ConfigError`).
 - `registry.py` — `ChannelRegistry` facade: `from_config` → `handle_inbound` (verify → reject-archive → parse → group/mention filters → dedup → archive → dispatch) and `send` (outbox enqueue with card rendering).
 - `models.py` — pydantic core: `InboundEnvelope` (archive-first: carries full raw payload), `OutboundMessage`, `Card`/`ApprovalCard`, `Interaction`, `Conversation` (direct/group/broadcast).
-- `capabilities.py` — `ChannelCapabilities` + the 10-adapter capability matrix (PRD §3.3). Consumers branch on capabilities, never adapter identity.
+- `capabilities.py` — `ChannelCapabilities` + the 11-adapter capability matrix (PRD §3.3). Consumers branch on capabilities, never adapter identity.
 - `verify.py` — per-channel signature/encryption primitives (Twilio HMAC-SHA1, Slack `v0:` signing with replay window, DingTalk HMAC-SHA256 with ms timestamps, WhatsApp hub signature, Feishu AES-256-CBC, WeCom SHA1+AES, generic HMAC). Includes encrypt helpers used by tests.
 - `cards.py` — `CardRenderer` (per-CAN_CARDS degradation: full cards → partial card+text → fallback text) and `CommandParser` (text commands like `同意 AP-123456` produce the same `Interaction` a card button produces — the cross-channel convergence point).
 - `outbox.py` — `OutboxSender`: enqueue-first, `[30,120,600]`s backoff, 3 attempts, `on_permanent_failure` hook, per-channel `TokenBucket` rate limits.
@@ -37,7 +37,7 @@ Tests default to `-m 'not integration'`; live-provider tests (needing sandbox cr
 - `hooks.py` — `ArchiveHook` (inbound raw / rejected / receipts) and `AuditHook` (sinks).
 - `config.py` — YAML config (PRD §4.3): channels, credentials refs, groups allowlist, `mentions_required`, `capabilities_override`, rate limits, `inbound.verify` (required|disabled), `inbound.archive` (full|metadata-only|off).
 - `fastapi.py` — `build_channel_router(registry)` → `POST /webhook/{channel_id}`; handles Feishu/Slack challenge echoes via adapter `webhook_response`.
-- `adapters/` — one file per provider, registered into `ADAPTERS` via `@register`. `HttpAdapterMixin._client()` injects `config["http_transport"]` (httpx.MockTransport) so tests never touch the network. `email_imap.py` is pull-mode: overrides `ChannelAdapter.poll()` (IMAP UNSEEN via injected `config["imap_fetch"]`) and sends via `config["smtp_send"]` (SMTP+STARTTLS); tests inject fakes for both. `ChannelRegistry.poll()` / `start_polling()` feed polled requests through the same handle_inbound pipeline; email `verify_request` always passes (TLS + login is the trust boundary).
+- `adapters/` — one file per provider, registered into `ADAPTERS` via `@register`. `HttpAdapterMixin._client()` injects `config["http_transport"]` (httpx.MockTransport) so tests never touch the network. `email_imap.py` is pull-mode: overrides `ChannelAdapter.poll()` (IMAP UNSEEN via injected `config["imap_fetch"]`) and sends via `config["smtp_send"]` (SMTP+STARTTLS); tests inject fakes for both. `ChannelRegistry.poll()` / `start_polling()` feed polled requests through the same handle_inbound pipeline; email `verify_request` always passes (TLS + login is the trust boundary). `graph_mail.py` is the M365/Exchange Online pull-mode variant (basic auth disabled there): OAuth2 client credentials via Graph API — token cached with 401 refresh, poll = list unread → fetch `$value` MIME → mark `isRead` → same ChannelRequest shape; Graph attachment refs become `MediaRef`s and `download_attachment(message_id, attachment_id)` returns real bytes; send via `sendMail`; config `folder` (INBOX default) + `poll_batch_limit` (20 default); verify passes (OAuth2 + TLS is the boundary).
 
 ## Hard rules (from PRD, enforced by tests)
 
