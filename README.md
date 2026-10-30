@@ -2,7 +2,7 @@
 
 Unified messaging channel access layer for the Fusion ecosystem ("一核九端"). One library gives any Fusion application the ability to **receive, send, join groups, be @-mentioned, and push approval buttons** across SMS and IM providers — with verification, dedup, outbox retry, rate limiting, archiving, and identity mapping built in.
 
-> Status: v0.1.2 — M1–M3 scope landed (core abstractions + 10 first-batch adapters, including pull-mode email). The M4 bridge service is intentionally **not** built yet (library-first per the PRD); M5 ecosystem adoption happens inside consumer projects.
+> Status: v0.1.3 — M1–M3 scope landed (core abstractions + 11 first-batch adapters, including pull-mode email). The M4 bridge service is intentionally **not** built yet (library-first per the PRD); M5 ecosystem adoption happens inside consumer projects.
 
 ## Why
 
@@ -31,6 +31,7 @@ pip install -e ".[test]"        # add ,fastapi for the webhook router
 | `whatsapp_cloud` | WhatsApp Cloud API | `X-Hub-Signature-256` | fallback text | – |
 | `telegram_bot` | Telegram Bot API | secret-token header | full (inline keyboard) | ✅ |
 | `email_imap` | Email (IMAP/SMTP) | transport auth (TLS + login) | fallback text | – |
+| `graph_mail` | Microsoft 365 / Exchange Online (Graph API, OAuth2 client credentials) | transport auth (OAuth2 + TLS) | fallback text | – |
 
 **Compliance red line:** no personal-WeChat reverse-engineered protocols. Official APIs only.
 
@@ -88,7 +89,7 @@ Full runnable example: `examples/approve_bot.py` with `examples/channels.yaml`.
 ## Architecture
 
 ```
-ChannelRegistry ── ChannelAdapter(SPI) ── 10 provider adapters
+ChannelRegistry ── ChannelAdapter(SPI) ── 11 provider adapters
       │                  │
 IdentityMapper    SignatureVerifier (per-channel policy)
       │                  │
@@ -132,6 +133,8 @@ await registry.poll()  # one-shot: fetch + dispatch
 registry.start_polling(interval=60)  # background worker; close() cancels it
 ```
 
+`graph_mail` is the Microsoft 365 / Exchange Online variant: M365 has basic auth disabled, so IMAP password login cannot connect. It polls the same way via Microsoft Graph with OAuth2 client credentials (`tenant_id` / `client_id` / `client_secret` / `mailbox`; register an Entra ID app with the `Mail.ReadWrite` application permission on the shared mailbox). Config keys: `folder` (default `INBOX`), `poll_batch_limit` (default 20). Unread messages are fetched as full MIME, then marked read so re-poll dedup matches `email_imap` semantics; Graph attachment refs land in `MediaRef` and consumers can pull real bytes with `adapter.download_attachment(graph_message_id, attachment_id)` — the document-pipeline path for emailed PDFs. Outbound uses `POST /users/{mailbox}/sendMail`; subject rules match `email_imap`.
+
 ## Capability matrix
 
 Every adapter declares `ChannelCapabilities` (CAN_RECEIVE / CAN_SEND / CAN_GROUP / CAN_BOT / CAN_MENTION / CAN_CARDS / CAN_MEDIA / CAN_RECEIPT / CAN_THREADS) — see `src/fusion_channel/capabilities.py`. Consumers branch on capabilities, never on adapter identity. Config `capabilities_override` tweaks per channel instance.
@@ -147,7 +150,7 @@ Every adapter declares `ChannelCapabilities` (CAN_RECEIVE / CAN_SEND / CAN_GROUP
 
 ```bash
 source /Users/dahai/fusion/.venv/bin/activate
-pytest tests/                          # 159 tests: crypto vectors, webhook E2E, outbox, matrix, hardening, email
+pytest tests/                          # 176 tests: crypto vectors, webhook E2E, outbox, matrix, hardening, email
 pytest tests/test_e2e_approval.py -v   # cross-channel approval acceptance
 ruff check . && ruff format --check .  # lint
 ```
@@ -161,6 +164,7 @@ Test coverage highlights:
 - Cross-channel approval acceptance: the same `AP-123456` decision arrives via SMS text, Slack Block Kit button, DingTalk signed command, Telegram inline keyboard, WhatsApp text, WeCom encrypted callback, Feishu group mention, and Feishu card button callback — one handler, one state machine.
 - Outbound E2E via `httpx.MockTransport`: Twilio/Feishu/Slack provider payload shapes asserted; `test_connection()` smoke-tested per adapter (DingTalk's is static — a robot send always lands in a real group).
 - Email (`email_imap`): MIME parse (text extraction, attachments, In-Reply-To threading), SMTP send with subject/In-Reply-To headers, fake-transport E2E through `registry.poll()` including dedup on re-poll, fetch-error isolation, card-fallback outbox send, polling worker lifecycle.
+- Microsoft 365 (`graph_mail`): mocked Graph HTTP via `httpx.MockTransport` — OAuth2 client-credentials token fetch + caching + 401 refresh, unread list → MIME fetch → mark-read verified, Graph attachment refs into `MediaRef`, `download_attachment()` bytes, registry poll dispatch + dedup on re-poll, mark-read-failure dedup fallback, `sendMail` payload shape, credentials-missing and provider-error paths.
 - Live provider calls require sandbox credentials and are marked `integration` (excluded by default): Feishu tenant-token handshake; QQ Mail real IMAP/SMTP E2E (login + poll + dedup on the live INBOX, SMTP send-to-self with loopback receive, env-based credentials `FUSION_CHANNEL_QQ_EMAIL` / `FUSION_CHANNEL_QQ_AUTH_CODE`).
 
 ## License

@@ -2,7 +2,7 @@
 
 fusion 生态的统一 IM/短信通道接入库。任何 fusion 应用借助它即可获得**收消息、发消息、进群、被 @、弹审批按钮**的能力——验签、去重、outbox 重试、频控、归档、身份映射全部内置。
 
-> 状态：v0.1.2 —— M1–M3 范围已落地（核心抽象 + 第一批 10 个适配器，含拉取式邮件）。M4 桥服务按 PRD 决策**暂不建设**（库优先）；M5 生态推广由各消费应用在自己的仓库内完成。
+> 状态：v0.1.3 —— M1–M3 范围已落地（核心抽象 + 第一批 11 个适配器，含拉取式邮件）。M4 桥服务按 PRD 决策**暂不建设**（库优先）；M5 生态推广由各消费应用在自己的仓库内完成。
 
 ## 为什么需要它
 
@@ -31,6 +31,7 @@ pip install -e ".[test]"        # webhook 路由再加 ,fastapi
 | `whatsapp_cloud` | WhatsApp Cloud API | `X-Hub-Signature-256` | 文本兜底 | – |
 | `telegram_bot` | Telegram Bot API | secret-token 头 | 完整（inline keyboard） | ✅ |
 | `email_imap` | 邮件（IMAP/SMTP） | 传输层认证（TLS + 登录） | 文本兜底 | – |
+| `graph_mail` | Microsoft 365 / Exchange Online（Graph API，OAuth2 客户端凭据） | 传输层认证（OAuth2 + TLS） | 文本兜底 | – |
 
 **合规红线**：个人微信逆向/外挂协议一概不做，只走官方 API。
 
@@ -88,7 +89,7 @@ user = registry.identify("family_twilio", "+15550000001")
 ## 架构
 
 ```
-ChannelRegistry ── ChannelAdapter(SPI) ── 10 个服务商适配器
+ChannelRegistry ── ChannelAdapter(SPI) ── 11 个服务商适配器
       │                  │
 IdentityMapper    SignatureVerifier（每通道策略）
       │                  │
@@ -132,6 +133,8 @@ await registry.poll()  # 单次：拉取 + 派发
 registry.start_polling(interval=60)  # 后台 worker；close() 会取消
 ```
 
+`graph_mail` 是 Microsoft 365 / Exchange Online 变体：M365 已禁用基本认证，IMAP 密码登录连不上。它同样走拉取，但用 Microsoft Graph + OAuth2 客户端凭据（`tenant_id` / `client_id` / `client_secret` / `mailbox`；在 Entra ID 注册应用并对共享邮箱授予 `Mail.ReadWrite` 应用权限）。配置项：`folder`（默认 `INBOX`）、`poll_batch_limit`（默认 20）。未读邮件拉取完整 MIME 后标记已读，二次拉取去重语义与 `email_imap` 一致；Graph 附件引用进入 `MediaRef`，消费应用可用 `adapter.download_attachment(graph_message_id, attachment_id)` 拉取真实字节——邮件 PDF 单据进入文档流水线的通路。出站走 `POST /users/{mailbox}/sendMail`，主题规则同 `email_imap`。
+
 ## 能力矩阵
 
 每个适配器声明 `ChannelCapabilities`（CAN_RECEIVE / CAN_SEND / CAN_GROUP / CAN_BOT / CAN_MENTION / CAN_CARDS / CAN_MEDIA / CAN_RECEIPT / CAN_THREADS），见 `src/fusion_channel/capabilities.py`。消费应用按能力分支，绝不按适配器身份硬编码。配置 `capabilities_override` 可按通道实例覆盖。
@@ -147,7 +150,7 @@ registry.start_polling(interval=60)  # 后台 worker；close() 会取消
 
 ```bash
 source /Users/dahai/fusion/.venv/bin/activate
-pytest tests/                          # 159 项测试：密码学向量、webhook E2E、outbox、矩阵、加固、邮件
+pytest tests/                          # 176 项测试：密码学向量、webhook E2E、outbox、矩阵、加固、邮件
 pytest tests/test_e2e_approval.py -v   # 跨通道审批验收
 ruff check . && ruff format --check .  # lint
 ```
@@ -161,6 +164,7 @@ ruff check . && ruff format --check .  # lint
 - 跨通道审批验收：同一个 `AP-123456` 决定分别经 SMS 文本、Slack Block Kit 按钮、钉钉加签指令、Telegram inline keyboard、WhatsApp 文本、企微加密回调、飞书群 @、飞书卡片按钮回调到达——一个 handler、一个状态机。
 - 出站 E2E（`httpx.MockTransport`）：断言 Twilio/飞书/Slack 真实请求体形态；每适配器 `test_connection()` 冒烟（钉钉为静态检查——机器人发送必进真实群）。
 - 邮件（`email_imap`）：MIME 解析（正文提取、附件、In-Reply-To 线程）、SMTP 发送（Subject/In-Reply-To 头）、假传输 E2E 走 `registry.poll()`（含二次拉取去重）、拉取异常隔离、卡片兜底 outbox 发送、轮询 worker 生命周期。
+- Microsoft 365（`graph_mail`）：`httpx.MockTransport` 模拟 Graph HTTP——OAuth2 客户端凭据 token 获取 + 缓存 + 401 刷新、未读列表 → MIME 拉取 → 标记已读验证、Graph 附件引用进 `MediaRef`、`download_attachment()` 真实字节、registry poll 派发 + 二次拉取去重、标记已读失败时的去重兜底、`sendMail` 请求体形态、凭据缺失与服务商报错路径。
 - 真实服务商调用需要沙箱凭据，标记为 `integration`（默认排除）：飞书 tenant-token 握手；QQ 邮箱真实 IMAP/SMTP E2E（登录 + 拉取 + 二次拉取去重、SMTP 发给自己并回环收回，凭据走环境变量 `FUSION_CHANNEL_QQ_EMAIL` / `FUSION_CHANNEL_QQ_AUTH_CODE`）。
 
 ## 许可证
