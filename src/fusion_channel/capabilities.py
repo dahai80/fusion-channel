@@ -153,6 +153,17 @@ CAPABILITY_MATRIX: dict[str, dict] = {
         "CAN_RECEIPT": False,
         "CAN_THREADS": True,
     },
+    "gmail_api": {
+        "CAN_RECEIVE": True,
+        "CAN_SEND": True,
+        "CAN_GROUP": False,
+        "CAN_BOT": False,
+        "CAN_MENTION": False,
+        "CAN_CARDS": "none",
+        "CAN_MEDIA": True,
+        "CAN_RECEIPT": False,
+        "CAN_THREADS": True,
+    },
 }
 
 

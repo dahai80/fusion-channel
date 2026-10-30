@@ -49,6 +49,7 @@ from fusion_channel.adapters.aliyun_sms import AliyunSmsAdapter  # noqa: E402
 from fusion_channel.adapters.dingtalk_robot import DingTalkRobotAdapter  # noqa: E402
 from fusion_channel.adapters.email_imap import EmailImapAdapter  # noqa: E402
 from fusion_channel.adapters.feishu_app import FeishuAppAdapter  # noqa: E402
+from fusion_channel.adapters.gmail_api import GmailApiAdapter  # noqa: E402
 from fusion_channel.adapters.graph_mail import GraphMailAdapter  # noqa: E402
 from fusion_channel.adapters.slack_app import SlackAppAdapter  # noqa: E402
 from fusion_channel.adapters.telegram_bot import TelegramBotAdapter  # noqa: E402
@@ -64,6 +65,7 @@ __all__ = [
     "DingTalkRobotAdapter",
     "EmailImapAdapter",
     "FeishuAppAdapter",
+    "GmailApiAdapter",
     "GraphMailAdapter",
     "SlackAppAdapter",
     "TelegramBotAdapter",
