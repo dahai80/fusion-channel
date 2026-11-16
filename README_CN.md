@@ -1,5 +1,7 @@
 # fusion-channel（融合通道接入层）
 
+[![CI](https://github.com/dahai80/fusion-channel/actions/workflows/ci.yml/badge.svg)](https://github.com/dahai80/fusion-channel/actions/workflows/ci.yml)
+
 fusion 生态的统一 IM/短信通道接入库。任何 fusion 应用借助它即可获得**收消息、发消息、进群、被 @、弹审批按钮**的能力——验签、去重、outbox 重试、频控、归档、身份映射全部内置。
 
 > 状态：v0.1.5 —— M1–M3 范围已落地（核心抽象 + 第一批 12 个适配器，含拉取式邮件）。M4 桥服务按 PRD 决策**暂不建设**（库优先）；M5 生态推广由各消费应用在自己的仓库内完成。
