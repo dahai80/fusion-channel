@@ -12,7 +12,7 @@ from fusion_channel import ChannelRegistry
 registry = ChannelRegistry.from_config("channels.yaml", store=my_store)
 
 outbox_id = await registry.send(
-    "booking_sms",                                # channel id from channels.yaml
+    "booking_sms",  # channel id from channels.yaml
     {"type": "direct", "id": "+15550000001->+15550000000"},  # to->from for SMS
     text="Your cleaning is confirmed for Tue 10:00. Reply RESCHEDULE to change.",
 )
