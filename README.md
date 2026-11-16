@@ -4,7 +4,7 @@
 
 Unified messaging channel access layer for the Fusion ecosystem ("一核九端"). One library gives any Fusion application the ability to **receive, send, join groups, be @-mentioned, and push approval buttons** across SMS and IM providers — with verification, dedup, outbox retry, rate limiting, archiving, and identity mapping built in.
 
-> Status: v0.1.5 — M1–M3 scope landed (core abstractions + 12 first-batch adapters, including pull-mode email). The M4 bridge service is intentionally **not** built yet (library-first per the PRD); M5 ecosystem adoption happens inside consumer projects.
+> Status: v0.1.6 — M1–M3 scope landed (core abstractions + 12 first-batch adapters, including pull-mode email). The M4 bridge service is intentionally **not** built yet (library-first per the PRD); M5 ecosystem adoption happens inside consumer projects.
 
 ## Why
 
