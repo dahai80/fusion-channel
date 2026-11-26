@@ -14,6 +14,8 @@ Design source: the PRD at `architecture/fusion-channel-prd-1025.md` and the prod
 
 ## Install
 
+Requires Python >= 3.12 (the workspace pins `.python-version` to 3.12).
+
 ```bash
 cd /Users/dahai/fusion && source .venv/bin/activate
 pip install -e ".[test]"        # add ,fastapi for the webhook router
