@@ -14,6 +14,8 @@ fusion 有 48 个子项目，任何面向人的应用最终都需要 IM 通道�
 
 ## 安装
 
+需要 Python >= 3.12（工作区 `.python-version` 固定为 3.12）。
+
 ```bash
 cd /Users/dahai/fusion && source .venv/bin/activate
 pip install -e ".[test]"        # webhook 路由再加 ,fastapi
